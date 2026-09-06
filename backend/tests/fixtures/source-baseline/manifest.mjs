@@ -83,6 +83,7 @@ export const SAMPLES = [
     contractCharTarget: '3–4 万字',
     file: 'sample-03-long-form.txt',
     gtFile: 'ground-truth-sample-03.json',
+    gtSha256: '9724d0a9e20c83071830bec24664d63dfff5458666374abb32af421bae22c62b',
     fileSha256: '6b6a3c09338d421c3a19473a793996305158e0a43be6330bcd961f57ac5a1205',
     contentHash: '4afaad11b51009f96ff43157d234f507587abb552b295c822c77748c7474c25a',
     rawCharCount: 39517,

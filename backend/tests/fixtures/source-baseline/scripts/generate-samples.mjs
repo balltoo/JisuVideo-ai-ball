@@ -21,15 +21,20 @@
  *   ../ground-truth-sample-03.json
  *
  * 运行：cd backend/tests/fixtures/source-baseline/scripts && node generate-samples.mjs
+ * 测试隔离：设置 SOURCE_BASELINE_OUT_DIR=<临时目录> 时只写入该目录，
+ * 用于确定性校验，避免 npm test 改写受版本控制的 fixture。
  */
-import { writeFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const SYNTH_SEED = 20260907
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const OUT = join(__dirname, '..')
+const OUT = process.env.SOURCE_BASELINE_OUT_DIR
+  ? resolve(process.env.SOURCE_BASELINE_OUT_DIR)
+  : join(__dirname, '..')
+mkdirSync(OUT, { recursive: true })
 
 // ─── 确定性 PRNG（mulberry32） ──────────────────────────────────────────
 function mulberry32(seed) {

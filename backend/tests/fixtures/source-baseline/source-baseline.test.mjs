@@ -15,6 +15,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   BASE_DIR,
   pathOf,
@@ -66,9 +69,10 @@ for (const sample of SAMPLES.filter((s) => s.gtFile)) {
     }
     // 按规范段拼接 == 规范化输入（契约 T2 基准）
     assert.equal(normalizeContent(raw), gt.map((p) => p.text).join('\n\n'), 'gt 拼接与文件不一致')
-    // gt 文件字节与生成一致
+    // gt 文件字节由 manifest 固定，不能只校验能被 JSON 解析
     const gtBytes = readUtf8(sample.gtFile)
-    if (sample.gtSha256) assert.equal(fileSha256Of(gtBytes), sample.gtSha256, 'gtSha256 不符')
+    assert.ok(sample.gtSha256, '有 ground-truth 的样本必须固化 gtSha256')
+    assert.equal(fileSha256Of(gtBytes), sample.gtSha256, 'gtSha256 不符')
   })
 }
 
@@ -159,18 +163,31 @@ run('s03：长文（章节唯一有序 / 无重复段 / kind 仅 heading+body）
   }
 })
 
-// ─── 确定性：重跑生成器，字节不变 ───────────────────────────────────────
-run('确定性：重跑生成器后 s02/s03 字节不变（同 manifest hash）', () => {
+// ─── 确定性：在临时目录重跑生成器，绝不改写受控 fixture ─────────────────
+run('确定性：临时目录重跑生成器，四个产物逐字节不变且不污染工作区', () => {
   const script = pathOf('scripts/generate-samples.mjs')
-  const res = spawnSync(process.execPath, [script], { cwd: BASE_DIR, encoding: 'utf8' })
-  assert.equal(res.status, 0, `生成器退出码非 0：\n${res.stderr}`)
-  for (const id of ['s02-noise-webnovel', 's03-long-form']) {
-    const sample = sampleById(id)
-    const raw = readUtf8(sample.file)
-    assert.equal(fileSha256Of(raw), sample.fileSha256, `${id} 重生成后 fileSha256 变化`)
-    assert.equal(contentHashOf(raw), sample.contentHash, `${id} 重生成后 contentHash 变化`)
-    assert.equal(splitParagraphs(raw).length, sample.paraCount, `${id} 重生成后 paraCount 变化`)
+  const outDir = mkdtempSync(join(tmpdir(), 'jisu-source-baseline-'))
+  try {
+    const res = spawnSync(process.execPath, [script], {
+      cwd: BASE_DIR,
+      encoding: 'utf8',
+      env: { ...process.env, SOURCE_BASELINE_OUT_DIR: outDir },
+    })
+    assert.equal(res.status, 0, `生成器退出码非 0：\n${res.stderr}`)
+    for (const id of ['s02-noise-webnovel', 's03-long-form']) {
+      const sample = sampleById(id)
+      const generated = readFileSync(join(outDir, sample.file))
+      const committed = readFileSync(pathOf(sample.file))
+      assert.deepEqual(generated, committed, `${id} 重生成后字节变化`)
+      assert.equal(fileSha256Of(generated.toString('utf8')), sample.fileSha256, `${id} 重生成后 fileSha256 变化`)
+    }
+    for (const sample of SAMPLES.filter((s) => s.gtFile)) {
+      const generated = readFileSync(join(outDir, sample.gtFile))
+      const committed = readFileSync(pathOf(sample.gtFile))
+      assert.deepEqual(generated, committed, `${sample.id} ground-truth 重生成后字节变化`)
+      assert.equal(fileSha256Of(generated.toString('utf8')), sample.gtSha256, `${sample.id} ground-truth hash 变化`)
+    }
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
   }
-  const gt = readUtf8('ground-truth-sample-02.json')
-  assert.equal(fileSha256Of(gt), sampleById('s02-noise-webnovel').gtSha256, 's02 ground-truth 重生成后变化')
 })
