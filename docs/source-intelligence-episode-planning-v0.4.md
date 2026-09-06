@@ -1,7 +1,7 @@
 # 原文整理与智能分集 v0.4 需求与契约
 
-> 版本：v0.4-rev8（契约稿，待 Bugbot 复审 → owner 最终裁决）
-> 日期：2026-09-04（初稿）/ 2026-09-05（rev1，响应 PR #63 Hermes 技术评审）/ 2026-09-05（rev2，响应 Hermes 复审 P0-5/P0-6）/ 2026-09-05（rev3，响应 Codex 接管复审 P0-①~P0-⑤ / P1-①~P1-②）/ 2026-09-05（rev4，响应 Codex rev3 复审 P0 版本谱系 + P1×2 + P2）/ 2026-09-05（rev5，响应 Bugbot rev4 复审 4×P1 + 2×P2，字段语义单一来源收口）/ 2026-09-05（rev6，响应 Bugbot rev5 复审 2×P2，收口清零）/ 2026-09-05（rev7，响应 Bugbot rev6 最终复核 1×P2，switch expected 归属收口）/ 2026-09-05（rev8，响应 Bugbot rev7 最终复核 1×P1，switch CAS 统一含 null）
+> 版本：v0.4-rev9（公共契约已收口，待 Bugbot → owner 审核）
+> 日期：2026-09-04（初稿）/ 2026-09-05（rev1，响应 PR #63 Hermes 技术评审）/ 2026-09-05（rev2，响应 Hermes 复审 P0-5/P0-6）/ 2026-09-05（rev3，响应 Codex 接管复审 P0-①~P0-⑤ / P1-①~P1-②）/ 2026-09-05（rev4，响应 Codex rev3 复审 P0 版本谱系 + P1×2 + P2）/ 2026-09-05（rev5，响应 Bugbot rev4 复审 4×P1 + 2×P2，字段语义单一来源收口）/ 2026-09-05（rev6，响应 Bugbot rev5 复审 2×P2，收口清零）/ 2026-09-05（rev7，响应 Bugbot rev6 最终复核 1×P2，switch expected 归属收口）/ 2026-09-05（rev8，响应 Bugbot rev7 最终复核 1×P1，switch CAS 统一含 null）/ 2026-09-07（rev9，Issue #78：整理任务、Agent、锚点与长文恢复契约收口）
 > 修订记录：rev1 修复 P0-1/P0-2（§6.1 表结构选型与存储约束重写）、P0-3（§5.3 新增 `PUT /dramas/:id/source/current` + T10）、P0-4（§5.3 confirm 三态返回与原子性 UPDATE + T11）；同步吸收与本次表/端点修改同源的 P1-1（`source_hash` → `content_hash`/`base_hash`）、P1-4（整理任务进度复用 `GET /tasks/:id`）、P1-5（`user-edited` 测试缺口随 T10 补齐）；其余 P1-2/P1-3/P1-6 与 P2 各项登记为 v0.4.1 修正式 / owner 裁决意见（见 §10）。
 > 修订记录（rev2）：修复 P0-5（§6.1 版本序号并入自增主键 `id`，废除 `MAX(version_seq)+1` 并发撞号）、P0-6（§5.3 新增 `POST /dramas/:id/source/switch` 版本切换端点 + T12）；P1-新1（`PUT current` 与 skip 状态机死锁）随 P0-6 方案 A 自动闭环；P1-新2（`sys_task` 生命周期复用）与既有 P1 打包登记 v0.4.1（见 §10）。
 > 修订记录（rev3）：修复 Codex 复审 5 条 P0——①confirm 等指针写统一「锁 `dramas` 行 + 锁内判定」原子原语（§5.3）、②switch 请求体拆 `target_version_id` + `expected_current_version_id`（§5.3）、③`from-plan` 读取与哈希校验对象改为当前有效正文并列为 v0.4 唯一必改点（§5.2/§5.4）、④冻结规范化输入基准并登记 trim 实施改动（§3.3/§5.2）、⑤skip 语义收紧为「从未整理才允许」（§5.3）；顺手吸收 P1 两条文案（§0.1/§3.3 能力表述降级、§2.1 `chapter_marker` 不入删除区间）；§7.2 T2/T7/T8/T11/T12 断言同步（见 §10）。
@@ -10,8 +10,9 @@
 > 修订记录（rev6）：响应 Bugbot rev5 复审 head `56da3df`（2×P2 收口清零）——①§6.1 选型段措辞二分：新增类（懒生成 `source` / clean 产出 `cleaned` / confirm 派生 `confirmed` / PUT current 派生 `user-edited`）= 新建版本行 + 切指针；回退类（`switch`）= 仅移动指针、不新建版本行（不变量 I8）；②`PUT current` 的 `expected_current_version_id` 校验改归属优先：先按 `id` + `drama_id` 判定（不存在或属于其他项目 → `400`），属于当前项目但非当前指针才 `409`，kind 不合法 `400`；原子性与 T10 断言同步（不变量 I6）。**同一归属优先原则平行落实到 confirm 校验 1 与 switch 返回表**（409 行限定「属于当前项目」，400 行覆盖跨项目的 target/expected），杜绝 I6 缺口在其余含版本 id 参数的端点重现。登记见 §10。
 > 修订记录（rev7）：响应 Bugbot rev6 最终复核 head `cc9c26e`（1×P2，switch 原子流程漏写 expected 归属）——§5.3 switch 原子性补全为 5 步：锁 `dramas` 行 → 按 `id` + `drama_id` 校验 `target_version_id`（不存在 / 跨项目 / kind 非法 → `400`）→ `expected_current_version_id` 非 `null` 时按 `id` + `drama_id` 校验归属（不存在 / 跨项目 → `400`，I6）→ 属于本项目但不等于锁内当前指针 → `409` → `UPDATE` 指针提交；T12 补「跨项目 expected → 400」断言。返回表与 I6 已含该语义，rev7 使原子流程文字与之一致。登记见 §10。
 > 修订记录（rev8）：响应 Bugbot rev7 最终复核 head `1053830`（1×P1，switch 第 4 步把 CAS 限定为「expected 属于本项目」，expected=null 时并发绕过）——§5.3 switch 原子性第 4 步改**统一 CAS**：无论 expected 是数字还是 `null`，只要 ≠ 锁内当前指针（`null` vs 非 `null` 视为不等）→ `409`；第 3 步归属检查维持仅限非 `null` expected。confirm 锁内校验 1 与返回表 409 行同构澄清（null 参与统一 CAS，null vs 非 null 视为不等）。T12 补「expected=null 且锁内 current 已有版本 → 409」。登记见 §10。
+> 修订记录（rev9）：Issue #78 吸收此前登记的 P1-2/P1-3/P1-6/P1-新2：§2.1.1 冻结删除区间 Agent 的结构、坐标与拒绝语义；§3.1–§3.2 冻结重复段、前缀碰撞、短锚和逐版本坐标规则；§4.2–§4.5 冻结 `sys_task` 字段复用、同基线互斥、幂等、失败恢复、模型重试及成本边界；§7.2 和 §9 补可执行测试与无环依赖。本文仍是纯契约，不包含运行时代码或 schema 变更。
 > 关联：`docs/product-positioning-roadmap.md` §4「命名收敛」与 §4.1「v0.4 修正方向」、§5 定位裁决 #4；GitHub Issue #61
-> 基线：主仓库 `master` = `d778550`（rev4 同步主仓 master 至 PR #59/#69 等合入后）
+> 基线：主仓库 `master` = `9816b94`（PR #76/#77 合入后的 #78 认领基线）
 > 本文性质：**公共契约与需求稿**。只定义状态、数据、接口、失败降级与验收标准；不包含任何运行时代码、数据库迁移或对既有文件的业务修改。
 > 本文约定：凡标「**已冻结**」的行为/字段/边界为 v0.4 契约，后续实施任务必须遵守；凡标「**实施拆分时细化**」的为方向性设计，允许在对应实施 PR 中调整，但调整不得违背已冻结项。
 
@@ -41,7 +42,7 @@
 
 ### 0.3 对照基线说明
 
-本契约全文引用的文件、路由、字段、函数与测试均为当前 master（`21b1dd3`）真实存在项：
+本契约全文引用的文件、路由、字段、函数与测试均以认领基线 master（`9816b94`）为准；本文新增的任务/Agent/版本接口是后续实施目标，不表示该基线已具备对应运行时代码：
 
 - 路由：`backend/src/routes/dramas.ts`、`backend/src/routes/episodes.ts`
 - 数据模型：`backend/src/db/schema.ts`、`backend/src/db/mysql-schema.ts`
@@ -121,6 +122,26 @@ AI 自动整理只被允许输出「删除区间建议」，不允许输出改�
 > 删除区间的分类采用有限集合，v0.4 冻结如下：`ad`（广告）、`watermark`（水印/作者话）、`duplicate`（重复段）、`garbage`（乱码/无意义字符）。分类仅用于展示与统计，不改变删除语义。分类集合属于「实施拆分时可扩充」项。
 > **`chapter_marker` 不入删除区间（rev3，响应 Codex P1-②）**：章节号/卷标题行由 §2.1-5 提取为结构锚点并保留在正文，AI 整理**不得输出** `chapter_marker` 删除区间（与「章节标题不丢弃」一致）；`chapter_marker` 仅用于健康检查检出提示与锚点建立。用户确需删除章节标题时，经 `PUT /dramas/:id/source/current` 的 `user-edited` 人工编辑版本完成（§2.2），健康检查 issues 类型不含 `chapter_marker`（§5.3）。
 
+### 2.1.1 删除区间 Agent 输出适配（rev9，已冻结）
+
+Agent 的职责只限于建议，不可直接写 `cleaned` 正文、版本行或任务状态。每个分块完成后先适配为以下统一结构，再进入 §2.1 的确定性质量门：
+
+```json
+{
+  "input_version_id": 123,
+  "input_content_hash": "<任务启动基线的 content_hash>",
+  "removals": [
+    { "start": 40, "end": 58, "snippet": "推广文案……", "category": "ad" }
+  ]
+}
+```
+
+- 分块 Agent 若以块内局部坐标输出，适配器必须先依据该块已记录的全局起点换算；进入本结构后的 `start`/`end` 一律是相对**任务启动基线 canonical 正文**的 `[start, end)` UTF-16 code-unit 坐标。适配器必须断言 `baseline.slice(start, end) === snippet`。仅凭 `indexOf(snippet)` 定位一律不合格，重复段落不能依赖“找到第一处”。
+- `input_version_id` 与 `input_content_hash` 必须同时等于任务快照；任何一个不等都标记 `STALE_PROPOSAL` 并拒绝，不得把旧基线的建议套到新正文。
+- `removals` 按 `start` 升序、同一坐标最多一条；`end <= start`、越界、重叠、空 `snippet`、未知分类、`chapter_marker` 或 `slice` 不一致，均为 `INVALID_PROPOSAL`。适配器须返回可读的条目序号和原因，且不创建 `cleaned` 版本。
+- 分块输出合并前必须已完成全局坐标换算；合并后再次执行全量排序、重叠和可复现校验。任一块失败时整次整理失败，不写半成品，用户可从同一基线重新发起。
+- 质量门拒绝是业务终态，不作为模型网络重试；只有“请求尚未被供应商接受”的可判定瞬态错误才可按 §4.5 重试。
+
 ### 2.2 用户人工编辑后的规则切换
 
 用户直接编辑 `confirmed` 正文后进入 `user-edited`：
@@ -139,17 +160,18 @@ AI 自动整理只被允许输出「删除区间建议」，不允许输出改�
 
 | 锚点 | 定义 | 用途 |
 | --- | --- | --- |
-| 稳定段落 ID | `PARA-<sha256 前缀 8>[:<出现序号>]`，由「段落首行规范化后内容」计算，同段复现时 ID 稳定 | 跨版本、跨集回指段落的唯一键 |
+| 稳定段落 ID | `PARA-<hash_prefix_8>:<occurrence>`；`hash_prefix_8` 为段落**原文** SHA-256 的前 8 个十六进制字符，`occurrence` 为同一 `version_id` 内相同完整哈希按 `start` 排序的一位序号 | 同一版本内的可展示、可复核段落键；跨版本不能脱离完整哈希和版本坐标单独使用 |
 | 字符区间 | 相对所在正文的 `[start, end)`，UTF-16 code unit（与现有 `String.prototype.slice` 语义一致） | 删除区间、切片边界、差异记录的坐标系统 |
 | 段落内容哈希 | `sha256(段落原文)` | 精确校验段落在两个版本间是否逐字未变 |
-| 段首短锚 | 段落去空白后前 12 个字符（可配置长度） | 快速候选匹配与用户可读展示 |
+| 段首短锚 | 段落去首尾空白后前 12 个 UTF-16 code unit；不足 12 则取全部；空白段不生成独立锚点 | 快速候选匹配与用户可读展示，不是唯一性依据 |
 
-段落切分规则：优先按现有自然边界（`backend/src/services/episode-planning.ts` 的 `naturalBoundaries()` 句式边界 + 空行分段）划分段落；无法归并的连续短行合并为一段。
+段落切分规则：优先按现有自然边界（`backend/src/services/episode-planning.ts` 的 `naturalBoundaries()` 句式边界 + 空行分段）划分段落；无法归并的连续短行合并为一段。`source_anchors` 每行必须保存 `version_id`、完整 `hash`、`start`、`end`、`sort_order` 和可展示短锚；坐标只对该 `version_id` 的 canonical 正文有效，正文产生新版本后必须重新生成锚点，禁止把旧版本坐标直接复用到新版本。
 
 ### 3.2 定位与冲突处理
 
-- 后端按「段首短锚候选 → 内容哈希精确校验 → 区间在整体中单调重排」的顺序组合定位；候选数大于 1 时返回候选列表并提示冲突，不做静默猜测。
-- 定位失败的段（短锚漂移且哈希不命中）标记为 `unresolved`，由用户在该段上下文手动选择或降级为相邻段落（见 3.4）。
+- 后端按「段首短锚候选 → **完整 SHA-256** 精确校验 → 区间在整体中单调重排」定位；8 位前缀只用于缩小候选集，发生前缀碰撞时以完整 `hash` 分组，绝不以概率或前缀本身判定相同段。
+- 完整哈希相同的重复段依 `occurrence` 和 `sort_order` 区分；跨版本匹配时要求候选顺序单调。若多个候选仍均合法，返回候选列表并提示冲突，不做静默猜测。
+- 定位失败（短锚漂移且完整哈希不命中）或版本不一致（请求锚点的 `version_id` 非目标正文版本）均标记 `unresolved`；前者由用户在该段上下文手动选择或降级为相邻段落，后者必须先为目标版本重建锚点（见 3.4）。
 
 ### 3.3 AI 推荐集数与摘要 + 后端确定性切片
 
@@ -182,21 +204,48 @@ AI 自动整理只被允许输出「删除区间建议」，不允许输出改�
 | 分集草稿 | `normalizeReviewablePlan` | 1–50 集；单集标题 ≤200 字；摘要 ≤4000；批注 ≤2000；各集正文总长 ≤25 万字 |
 | 单集正文写入 | `PUT /episodes/:id` | `content` ≤25 万字；`description` ≤4000 |
 
-### 4.2 AI 整理的长文分段（实施拆分时细化，方向已冻结）
+### 4.2 AI 整理的长文分段与检查点（rev9，已冻结）
 
-- 长文整理任务按序分块处理（每块字符数由实施任务根据模型上下文定，但块边界必须落在 §3.1 段落边界），逐块产出删除区间，最后合并为一个删除区间集合后整体校验（§2.1）。
-- 任务幂等：同一 `source` 的整理任务可重试，不产生半成品 `cleaned`；只有全量校验通过才原子落版本。
-- 中断恢复：整理任务状态可断点续跑（复用 `backend/src/utils/task-lifecycle.ts` 与 `sys_task` 恢复租约的模式；具体落点由实施任务确认）。
+- 整理输入上限仍为 §4.1 的 20 万字；超过上限必须在**创建任务前** `400` 拒绝，不截断、不创建空任务。首期不把“更长文本”伪装为已支持能力。
+- 输入按段落边界顺序分块；每块最大字符数由实施 PR 根据所选模型上下文设为配置常量，并在 `params.source_cleanup.chunk_size` 中记录实际值。块不可跨段落，最终一块可小于常量。
+- `params.source_cleanup.checkpoint` 是唯一的恢复检查点，至少含 `input_version_id`、`input_content_hash`、`chunk_count`、`next_chunk_index`、已验证的全局 `removals`、`estimated_cost`，以及当前块的 `inflight_chunk_index`、`submission_state`、`task_id`。其中 checkpoint 的 `task_id` 必须与 `sys_task.task_id` 同值镜像，避免两个事实源分叉。`submission_state` 仅可为 `not_submitted`、`submitting`、`accepted`：初始/完成一个块后为 `not_submitted`；向 Agent/供应商发出当前块请求**前**，必须原子写入 `inflight_chunk_index` + `submitting`；拿到可查询上游 ID 后原子改为 `accepted` 并同时写入两个位置的 `task_id`。检查点只保存坐标、哈希和必要统计，不复制整篇原文或 Agent 原始输出。
+- 每完成一个块，先运行 §2.1.1 的适配与局部校验，再原子更新 `next_chunk_index`、清空 `inflight_chunk_index/task_id` 并设回 `not_submitted`。恢复时重新读取 `input_version_id` 的内容并核对哈希；版本行不可变但哈希不等、检查点损坏或配置不可用时任务失败并要求用户重新发起，绝不猜测续跑位置。恢复只允许两种安全路径：① `submission_state=not_submitted` 且 `inflight_chunk_index` 为空，从最后一个已校验的 `next_chunk_index` 继续；② `submission_state=accepted` 且有可查询 `task_id`，只读查询/续跑该上游任务，不重新提交。`submitting`、缺失/不一致状态，或 `accepted` 却无可查询 `task_id` 一律视为送达未知并标记 `failed`；由用户显式重新发起，不能自动重跑该块。**实现边界**：现有 `backend/src/services/recovery.ts` 对非视频 `processing` 任务会直接标失败，故 #72 必须为 `source_cleanup` 增加独立的恢复分派和租约认领路径；不得把它送入现有 image/video `backend/src/services/generation.ts` 执行器，也不得沿用“非 video 直接失败”的分支。
+- 所有块完成后再合并为一个删除区间集合并做一次全量质量门；**只有**全量通过后，才在同一事务内创建 `cleaned` 版本并标记任务完成。任何失败都不得产生半成品 `cleaned` 或改变当前有效正文。
 
-### 4.3 进度与成本提示（已冻结）
+### 4.3 `sys_task` 复用、进度与结果（rev9，已冻结）
 
-- 健康检查 / 整理过程向前端暴露阶段进度（`checking → cleaning → verifying → ready`）与当前阶段状态。
-- 整理任务统一落 `sys_task`（沿用 `backend/src/services/generation.ts` 的任务生命周期），`task_key` = `sys_task.id`；前端通过**现有** `GET /tasks/:id`（`backend/src/routes/tasks.ts`）查询进度与结果，不新增独立进度端点。
-- 发起整理前返回**字符数 + 预估 token 量 + 预估成本上限**的提示信息（纯估算，不发起真实调用即可展示）；确认稿预览页展示本稿删除统计（按 §2.1 分类计数、删除总字数）。
+整理任务复用现有 `sys_task`，但不借用图片/视频语义。实现必须使用下表，任何未列字段不作为整理任务事实源：
 
-### 4.4 并发与限流（已冻结）
+| 既有字段 | 整理任务冻结语义 |
+| --- | --- |
+| `id` | `task_key`，字符串响应时为该数值的十进制表示 |
+| `type` | 固定为 `source_cleanup`（长度不超过现有 `VARCHAR(16)`）；现有图片/视频任务仍仅为 `image`/`video` |
+| `drama_id` | 必填，整理所属项目；`storyboard_id`/`scene_id`/`character_id`/`prop_id` 均为 `NULL` |
+| `provider` / `model` | 实际选用的模型配置快照；规则型健康检查不创建任务也不填写这些字段 |
+| `params` | 唯一的整理元数据载体：`source_cleanup` 内含已解析的 `config_id`、`intent_key`、输入版本/哈希、阶段、检查点、成本估算、最终 `cleaned_version_id` 与可读错误详情 |
+| `status` | 仅复用 `processing`（进行中）、`completed`（已产生且仅产生一次完整 `cleaned`）与 `failed`（无产物失败）；接口展示的 `running` 对应 `processing`，不得另写未存在的 `running` 值 |
+| `task_id` | 仅当供应商确实返回可查询的上游请求 ID 时写入；本地/同步 Agent 调用保持 `NULL`，不能把幂等键或检查点塞入此字段 |
+| `error_msg` | 终态 `failed` 的短可读错误；机器可读原因和条目详情写入 `params.source_cleanup.error` |
+| `result_url` / `local_path` | 整理任务必须为 `NULL`，正文结果只存在 `source_versions`，不得伪造媒体 URL/路径 |
+| `recovery_at` / `recovery_owner` | 沿用租约语义做单执行者认领；不可把“租约过期”直接视为可以重提模型请求 |
+
+- 阶段值固定为 `queued → cleaning → verifying → ready`；`queued`/`cleaning`/`verifying` 映射 `status=processing`，`ready` 映射 `completed`。`failed` 由 `status` 表示，不伪造阶段值。
+- 前端继续轮询既有 `GET /tasks/:id`；该接口返回原始 `sys_task`，前端只从 `params.source_cleanup` 读取阶段、块进度、统计和结果版本 id。#72 在接线时必须保持此兼容性，不新增平行进度事实源。
+- 发起整理前必须先调用 §5.3 的 `POST /dramas/:id/source/clean/estimate`：这是只读估算，不创建任务、不调用模型，返回字符数、预估 token、`estimated_cost` 与解析后的配置快照。所选模型没有可验证单价时，`estimated_cost` 必须为 `null` 且 `pricing_status="pricing_unavailable"`；UI 展示“无法估算”，不得把 `0` 当成免费。确认稿预览页展示删除分类计数和删除总字数。
+
+### 4.4 并发、互斥与幂等（rev9，已冻结）
 
 - 所有 AI 调用沿用 `backend/src/services/request-guard.ts` 的 `acquireAiRequest` 门控（429 + `Retry-After`），整理任务与分集任务使用不同 key 前缀避免互相挤占。
+- 服务端先将 `config_id_or_default` 解析为实际 `config_id` 与对应的 `provider/model` 快照，再计算 `intent_key = sha256("source_cleanup:v1:" + drama_id + ":" + input_version_id + ":" + input_content_hash + ":" + resolved_config_id)`；解析后的 `config_id` 必须同时写入 `params.source_cleanup`。客户端不可传入或覆盖 `intent_key`，默认配置后来切换也不能改写既有任务的身份。
+- 互斥范围固定为**同一 `drama_id` 同时最多一个** `type=source_cleanup` 且 `status=processing` 的任务。创建任务前在 §5.3 的项目行锁内查询该任务：存在即返回 `{ status: "already_running", task_key }`，不论调用方携带的配置或基线是否不同；调用方须等待、查看结果或在终态后显式重发。不存在才创建一行并返回 `{ status: "running", task_key }`。`intent_key` 用于精确审计和重发归因，不能放宽项目级互斥。
+- 执行者完成时必须认领任务租约并在事务内复核 `status=processing`、输入版本与哈希、以及尚无 `cleaned_version_id`；首个成功者创建版本、写结果并置 `completed`，其余重复完成者读取既有结果后静默结束。任何路径都不能因重复回调创建第二个 `cleaned` 行。
+
+### 4.5 重试、失败恢复与费用边界（rev9，已冻结）
+
+- 可自动重试仅限“供应商明确保证未接单”的可判定失败（例如本地在发出请求前失败，或供应商返回明确的未受理/未创建任务结果），最多 **2 次重试 / 共 3 次尝试**，指数退避 1s、2s；每次尝试写入检查点审计信息。网络超时、网关 5xx、连接中断和未知 429 均不能仅凭 HTTP 类别推定未送达。
+- 一旦已写入 `task_id`、供应商已确认接收、或无法证明请求未送达（包括超时/5xx/连接中断），服务重启后**不得自动重提**，只能在保留同一任务上下文的前提下查询/续跑；不可查询时标记 `failed` 并要求用户显式重新发起，避免重复计费。
+- `INVALID_PROPOSAL`、`STALE_PROPOSAL`、质量门拒绝、参数错误、模型配置缺失和超出输入上限均不可自动重试。用户重新发起会生成新任务；若同一意图的失败任务存在，不得把它误报为 `already_running`。
+- 成本预算首期只做提示和审计，不实现自动扣费上限或自动模型切换：模型切换、强制重跑、扩大分块上限均须由用户重新发起并产生新的 `intent_key`。后续若要做预算拦截，必须另立公共契约和 schema/API 变更，不能在 #72/#73 偷加。
 
 ---
 
@@ -265,6 +314,25 @@ AI 自动整理只被允许输出「删除区间建议」，不允许输出改�
 - 任务成功：新增一行 `base_kind=cleaned` 版本（`content` = 删除区间应用结果，见 §6.1）；**不改变当前有效正文指针**——清理稿未确认前不生效，用户可预览、可放弃、可重跑，旧版本不被覆盖也不被删除。
 - 输入基线与哈希（rev5 定稿，响应 Bugbot P1-①）：清理结果必须挂在**任务启动时的输入基线**下——新 `cleaned` 行的 `parent_version_id` = 任务启动时锁内读到的当前有效正文版本行 id（首轮整理 = `source` 行；二次整理 = 当时当前的 `confirmed`/`user-edited` 行）。哈希按 §6.1 不变量 I1/I2 统一：`content_hash` = `sha256(String(cleaned.content || '').trim())`，是**本行 content** 的哈希；`base_hash` = `parent_version_id` 指向行（输入基线）的 `content_hash`。rev4 旧述「content_hash 同步为基线正文的 content_hash」与 I1（content_hash = 本行内容哈希）冲突，已废除——发生实际删除后 cleaned 的正文与其哈希不一致会让 `from-plan` 固定 409。
 - 指针漂移防护（rev4 保留，§5.3 confirm 校验 3）：任务完成时若当前指针已被 switch/confirm/PUT current 切走，候选行仍作为历史保存（parent/基线已固化），但 confirm 因「`target.parent` ≠ 当前正文」拒绝它，不覆盖新当前正文。
+
+#### `POST /dramas/:id/source/clean/estimate`
+
+整理前的只读估算。因请求可携带 `model`/`config_id`，与健康检查同样采用 POST；它**不创建 `sys_task`、不写版本、不调用模型**。
+
+- 请求体：`{ model?: string, config_id?: number }`；服务端按与 clean 相同的配置选择规则解析为实际 `config_id`、`provider` 和 `model`。项目不存在、配置不存在/未启用或当前有效正文超过 20 万字时返回 `400`。
+- 响应 `200`：
+```json
+{ "code": 200, "data": {
+  "input_version_id": 123,
+  "input_content_hash": "...",
+  "char_count": 12000,
+  "estimated_tokens": 6000,
+  "estimated_cost": null,
+  "pricing_status": "known|pricing_unavailable",
+  "config": { "id": 9, "provider": "...", "model": "..." }
+}, "message": "success" }
+```
+- `pricing_status=known` 时 `estimated_cost` 是非负数上限；`pricing_status=pricing_unavailable` 时 `estimated_cost` 必须为 `null`。估算结果只用于展示和审计，不是费用锁定、支付授权或任务幂等凭据。
 
 #### `GET /dramas/:id/source/versions`
 
@@ -450,18 +518,22 @@ AI 自动整理只被允许输出「删除区间建议」，不允许输出改�
 
 | # | 层 | 用例 | 断言 |
 | --- | --- | --- | --- |
-| T1 | 纯函数（定位） | 锚点四件套计算 | 稳定段落 ID 对同段重复计算一致；不同段冲突概率受哈希前缀控制 |
+| T1 | 纯函数（定位） | 锚点四件套计算 | 同版本同段重复计算一致；8 位前缀碰撞但完整哈希不同仍可区分；完整重复段按 occurrence/sort_order 区分；短段与空白段遵循 §3.1 |
 | T2 | 纯函数（切片一致性） | 确认稿进入 `splitSourceIntoEpisodes` | 按集拼接 = 规范化输入（`String(content).trim()` 基准，rev3）；`character_count` 和=规范化输入长度；段落不重复；输入含首尾空白/段间空行时不丢内容 |
 | T3 | 纯函数（可复现性） | 同一任务输入基线+同一删除区间集合跑两次整理校验 | 两次 `cleaned` 逐字节相等（输入基线 = clean 启动时当前有效正文快照 = 结果行 parent content，§6.1 I3，rev5） |
-| T4 | 纯函数（质量门） | 删除区间含重叠/越界/找不到 snippet 的非法集 | 校验拒绝并给出具体错误 |
+| T4 | 纯函数（质量门） | 删除区间含重叠/越界/找不到 snippet/重复片段错坐标/非法分类的集合 | 校验拒绝并给出具体错误；不得用 `indexOf` 把重复片段静默指向第一处 |
 | T5 | 路由（健康检查） | clean/issues 两态响应 | 无模型调用；issues 分类计数正确 |
-| T6 | 路由（clean） | 发起/重跑/并发 | running/already_running；旧版本不被覆盖；任务完成后新 cleaned 行 `parent_version_id` = 启动时当前正文行、`content_hash` = `sha256(cleaned.content)`、`base_hash` = 该 parent 行的 `content_hash`（rev5 P1-①，§6.1 I1/I2/I3） |
+| T6 | 路由（clean） | 发起/重跑/并发 | 同项目已有 `source_cleanup + processing` → `already_running` 且复用同一 task_key；不存在才 `running`；不同模型/基线调用也不得并发创建第二行。旧版本不被覆盖；任务完成后新 cleaned 行 `parent_version_id` = 启动时当前正文行、`content_hash` = `sha256(cleaned.content)`、`base_hash` = 该 parent 行的 `content_hash`（rev5 P1-①，§6.1 I1/I2/I3） |
 | T7 | 路由（confirm） | 锁内校验 + 派生 confirmed | 确认最新候选 cleaned → 200：新建 `confirmed` 派生行（parent=target、`diff`/`stats`=identity）、指针切换、cleaned 原行保留（rev4/rev5）；确认后 `GET /versions`：confirmed 行 `parent_version_id` = 其 target cleaned 行 id、`base_hash` = 该 parent 的 `content_hash`、`diff` = identity（rev5 P2-①）；确认 #11 后再确认旧 #10 → 409（非其 parent 下最新，rev4）；`expected_current_version_id` 过期 → 409；target 不存在 / 非 cleaned / **属于其他项目** → 400（rev5 P1-②）；confirm 成功清除 skip 标记 |
 | T8 | 路由（skip） | 跳过整理 | 当前=source（含存在未确认 cleaned 候选）→ 200 记录标记，候选保留为未采用历史（rev4）；当前=confirmed/user-edited → 400 提示先 switch 回 source；clean/confirm/PUT current/switch 把正文切离 source 时清除标记 |
 | T9 | 集成（旧项目） | 无版本记录项目完整走分集 | 行为与现状基线一致（逐接口 diff 为空） |
 | T10 | 路由（user-edited） | `PUT /source/current` 编辑切换 | confirmed 编辑后新建 `user-edited` 行、指针切换、旧行保留为快照；重复编辑产生第二条 user-edited；`expected_current_version_id` 不存在或**属于其他项目** → 400（rev6，I6）；属于本项目但已非当前指针（并发切走）→ 409；对 `cleaned`/`source` 行编辑 → 400 |
 | T11 | 路由（并发） | confirm / PUT current 并发 | 同一 cleaned 并发 confirm 两次，第二个按锁序 409（rev4 锁内判定）；clean 基于 A 启动、期间 switch 到 B、再 confirm A 的结果 → 409（parent 基线不符，rev4）；PUT current 并发切换，败者 409 且不产生孤儿版本行 |
 | T12 | 路由（switch） | `POST /source/switch` 版本切换 | 从 confirmed 切回 `source` 行 → 200 且 current=source、不新建版本行；切 `cleaned` 行 → 400；`target_version_id` 不存在或**属于其他项目** → 400（rev5 P1-②）；`expected_current_version_id` 不存在 / **属于其他项目**（跨项目真实版本 ID）→ 400（rev7，I6）；target = 当前指针（expected 匹配）→ 幂等 200；`expected_current_version_id` 与锁内当前指针不等 → 409——含：数字过期（两个 switch 并发 / 与 PUT current 并发，后到者 409，rev3）、**`null` vs 锁内 current 已有版本**（调用方未整理视角过期，rev8）；switch 后旧当前行降为只读历史、再 `clean`+`confirm` 状态机可重新走通（P0-6 / P1-新1 闭环） |
+| T13 | 服务（任务字段） | `source_cleanup` 创建、轮询与完成 | §4.3 字段逐项断言：`type`/`drama_id`/`params`/三态 status 正确，媒体字段为 NULL；`GET /tasks/:id` 可读到阶段、检查点和 `cleaned_version_id` |
+| T14 | 服务（恢复与费用） | 明确未接单失败、未知送达、已有 `task_id` 后重启、质量门拒绝 | 仅明确未接单的失败最多共 3 次；超时/5xx/未知送达及已有 `task_id` 均不自动重提；质量门/适配器错误直接 failed；失败无 cleaned；无单价时成本为 null 而非 0 |
+| T15 | 服务（长文） | 多块、检查点、服务重启恢复 | 块边界均为段落边界；请求前持久化 `submitting`，收到可查询上游 ID 后持久化 `accepted + task_id`；`backend/src/services/recovery.ts` 仅在 `not_submitted + inflight_chunk_index=null` 时继续，或对 `accepted + task_id` 只读续跑；`submitting`、缺失/不一致及 `accepted` 无 task_id 均必须 failed，不落入现有“非 video 直接 failed”分支；哈希/检查点不一致则 failed；最终全量校验通过前无 cleaned |
+| T16 | 路由/服务（Agent 适配） | 旧基线、重复 snippet、章节标题 | `STALE_PROPOSAL`/`INVALID_PROPOSAL` 可读且无版本产物；重复文本按坐标删除正确的一处；`chapter_marker` 永远不能进入 removals |
 
 ### 7.3 三个代表样本（roadmap §6「真实基线」先行对象）
 
@@ -489,15 +561,20 @@ AI 自动整理只被允许输出「删除区间建议」，不允许输出改�
 
 ---
 
-## 9. 实施拆分方向（契约合入后由主账号发布 Issue，不占本期）
+## 9. 已登记实施顺序与热点（rev9，已冻结）
 
-1. **DB 版本表迁移任务**：`source_versions` + 锚点表幂等 DDL（热点：`backend/src/db/`）。
-2. **后端健康检查/整理任务**：规则型健康检查、AI 整理任务化、质量门校验器、版本写入（热点：`backend/src/routes/dramas.ts`、`services/`、`utils/` 共享工具区）。
-3. **Agent 与锚点**：整理 Agent（或并入现有 Agent 体系）、段落锚点服务、`mastra/index.ts` 挂载（roadmap §4.1 锚点落点）。
-4. **前端步骤**：检查/整理/确认向导与版本查看（热点：`frontend/app/views/drama/detail.vue` 巨型页、`useApi.ts`）。
-5. **代表样本与质量基线**：S1/S2/S3 跑通并记录到台账（不与 1–4 抢热点）。
+| 顺序 | Issue | 责任线 | 前置 / 被谁阻塞 | 热点与边界 |
+| --- | --- | --- | --- | --- |
+| 0 | #71 | shared-contract | 已完成 | 版本骨架基线；不再返工 |
+| 1 | #78 | shared-contract | 已完成本文后解除后续任务 | 只改本契约，定义 #72/#73/#79 的共同事实源 |
+| 2 | #72 | Fork A / content-intelligence | blocked by #78 | `dramas.ts`、整理服务、质量门、`sys_task` 接线与 `backend/src/services/recovery.ts` 的 source_cleanup 独立恢复分派；不改 Agent 注册与前端大页 |
+| 3 | #73 | Fork A / content-intelligence | blocked by #78 与 #72 的任务/版本落点 | Agent 删除区间适配、锚点服务、`mastra/index.ts`；不得另起平行任务生命周期 |
+| 4 | #79 | Fork A / content-intelligence | blocked by #78；接入时依赖 #72/#73 的有效正文与结果 | 版本读取/确认/编辑/切换端点与当前有效正文；不重写 #72 的质量门 |
+| 5 | #74 | Fork A / frontend | blocked by #72/#73/#79 | `detail.vue`、`useApi.ts`；只消费冻结 API/任务契约 |
+| 6 | #80 | Fork B / production-reliability | 可与 #72–#74 并行 | 代表样本 fixture/期望结果；不占上述热点 |
+| 7 | #75 | Fork B / production-reliability | blocked by #72/#73/#74/#79 与 #80 | 真实闭环、回归和台账；不改业务实现 |
 
-> 以上仅为后续拆分建议；实际以主账号按任务认领制发布的 Issue 为准。本文合入前不得改动任何热点文件。
+依赖只允许从上到下；共享文件、schema、共享 utils 或接口形状需要变更时，先拆最小公共契约 PR 再实施，禁止让一个 Fork 的 PR 依赖另一个未合入分支。实际认领以主账号 Issue 台账为准。
 
 ---
 
@@ -577,17 +654,14 @@ AI 自动整理只被允许输出「删除区间建议」，不允许输出改�
 | --- | --- | --- |
 | P1 | switch 原子性第 4 步把 CAS 冲突判断限定为「expected 属于本项目」；expected=null 时该前置不成立 → 不返回 409、继续更新指针，绕过乐观并发控制；且与返回表「expected ≠ 当前指针 → 409」矛盾 | §5.3 switch 原子性第 4 步改**统一 CAS**：无论 expected 是数字还是 `null`，只要 ≠ 锁内当前指针（`null` vs 非 `null` 视为不等）→ `409`；第 3 步归属检查仅限非 `null` expected。confirm 锁内校验 1 与返回表 409 行同构澄清（null 参与统一 CAS）。§7.2 T12 补「expected=null 且锁内 current 已有版本 → 409」 |
 
-### 10.2 登记 v0.4.1 修正式（后续独立 PR，本文不再扩大范围）
+### 10.2 rev9 已吸收的后续项
 
-- **P1-2**：§3.1 段落稳定 ID 的 sha256 前缀碰撞预算（建议同项目碰撞概率 < 1e-6）与碰撞降级路径（回退 `[start, end)` + 段首短锚）。
-- **P1-3**：补 §4.5「重试契约」——重试上限与退避、幂等键（`task_key` vs `source_hash + model`）、付费调用是否重试的取舍。
-- **P1-6**：§9 实施拆分条目标注 `blocks / blocked-by` 依赖顺序（§9.2 涉及 `backend/src/utils/` 共享工具区，需与 Fork B #59/#62 协调热点）。
-- **P1-新2（复审）**：§4.3/§4.5 明确 `sys_task` 字段复用规则（`status`/`progress`/`error`/`result` 为视频任务语义）+「running」判定条件（是 `sys_task.status=running`，还是存在未完成历史任务）+ 并发重跑幂等（是否产生两个 `sys_task` 行）；与 P1-3 一起打包 v0.4.1 修正式。
+- **P1-2**（锚点前缀碰撞与短锚）、**P1-3**（重试/费用）、**P1-6**（实施依赖）和 **P1-新2**（`sys_task` 生命周期/并发）已由 Issue #78 分别收口到 §3、§4、§9 与 T1/T4/T6/T13–T16；不再登记为待处理的 v0.4.1 项。
+- 本文之外如需扩展 20 万字上限、引入预算强拦截、改变 `sys_task` 结构或实现自动模型切换，均须单独立 Issue 和公共契约，不能借 #72/#73 范围直接落地。
 
 ### 10.3 P2 意见（提交 owner 裁决时知情即可，不在本契约占位）
 
 - §5.3 `health-check` 等只读端点使用 POST 的 REST 语义说明（用 POST 系因可选请求体；是否改 GET 由实施任务裁决）。
 - `created_at`/`updated_at` 用 `VARCHAR(64)` 存储时间：为对齐现有表可保留，但时间倒序仅能字符串比较；是否切 `DATETIME`/`BIGINT` 由 DB 实施任务评估后裁决。
-- §3.1 段首短锚兜底规则：空白段 / 短于 12 字符的段如何取锚。
 - §7.1 回归清单是否覆盖 `backend/tests` 全量：实施 PR 应在触碰对应模块时补充说明。
 - §0.2（本 PR 范围）与 §7.1（实施 PR 范围）的范围澄清：已在 rev1 落地于 §0.3，本条不再作为待裁决项。
