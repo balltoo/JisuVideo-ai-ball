@@ -8,7 +8,14 @@ import { getActiveConfigId } from '../services/ai.js'
 import { importNovelSource } from '../services/source-import.js'
 import { defaultEpisodeCount, splitSourceIntoEpisodes } from '../services/episode-planning.js'
 import { contentFingerprint, normalizeReviewablePlan, parseJsonArray, serializePlanDraft, sourceHash } from '../services/episode-plan-draft.js'
-import { ensureSourceVersion, SourceContentConflict } from '../services/source-versions.js'
+import { ensureSourceVersion, getCurrentSourceText, SourceContentConflict } from '../services/source-versions.js'
+import {
+  estimateSourceCleanup,
+  inspectSourceHealth,
+  isSourceCleanupAdapterReady,
+  queueSourceCleanupTask,
+  startSourceCleanup,
+} from '../services/source-cleanup.js'
 import { acquireAiRequest } from '../services/request-guard.js'
 import { parseJsonObject } from '../utils/json.js'
 import { sampleSourceContent } from '../utils/source-sample.js'
@@ -406,6 +413,66 @@ ${analysisContent}
     return badRequest(c, err?.message || '项目方案提炼失败，请稍后重试')
   } finally {
     guard.release()
+  }
+})
+
+// POST /dramas/:id/source/health-check — 纯规则健康检查：不调用模型、不写数据库。
+app.post('/:id/source/health-check', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  let body: any = {}
+  try { body = await c.req.json() } catch { /* 空请求体允许，读取当前有效正文 */ }
+  const [drama] = await db.select().from(schema.dramas).where(eq(schema.dramas.id, id))
+  if (!drama || drama.deletedAt) return notFound(c, '项目不存在')
+  const content = body?.source_content === undefined
+    ? await getCurrentSourceText(id)
+    : String(body.source_content ?? '').trim()
+  if (content.length > 200_000) return badRequest(c, '全文内容超过 20 万字，请先精简后再检查')
+  return success(c, inspectSourceHealth(content))
+})
+
+// 兼容 #72 初版任务文案：GET /source/clean 同样只做规则健康检查，
+// 不会创建清理任务；写操作始终只能使用 POST /source/clean。
+app.get('/:id/source/clean', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  const [drama] = await db.select().from(schema.dramas).where(eq(schema.dramas.id, id))
+  if (!drama || drama.deletedAt) return notFound(c, '项目不存在')
+  const content = await getCurrentSourceText(id)
+  if (content.length > 200_000) return badRequest(c, '全文内容超过 20 万字，请先精简后再检查')
+  return success(c, inspectSourceHealth(content))
+})
+
+// POST /dramas/:id/source/clean/estimate — 只读估算；不得创建任务或触发模型。
+app.post('/:id/source/clean/estimate', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  let body: any = {}
+  try { body = await c.req.json() } catch { /* config_id 可省略 */ }
+  try {
+    return success(c, await estimateSourceCleanup(id, body?.config_id))
+  } catch (error: any) {
+    if (error?.message === '项目不存在') return notFound(c, error.message)
+    return badRequest(c, error?.message || '整理预估失败')
+  }
+})
+
+// POST /dramas/:id/source/clean — 创建 source_cleanup 任务；Agent 适配由 #73 注册。
+app.post('/:id/source/clean', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  let body: any = {}
+  try { body = await c.req.json() } catch { /* 使用默认文本配置 */ }
+  if (!isSourceCleanupAdapterReady()) {
+    return badRequest(c, '原文整理 Agent 适配器尚未就绪，暂不能发起任务')
+  }
+  try {
+    const started = await startSourceCleanup(id, body?.config_id)
+    if (started.status === 'running') queueSourceCleanupTask(Number(started.task_key))
+    return success(c, started)
+  } catch (error: any) {
+    if (error?.message === '项目不存在') return notFound(c, error.message)
+    return badRequest(c, error?.message || '原文整理任务创建失败')
   }
 })
 

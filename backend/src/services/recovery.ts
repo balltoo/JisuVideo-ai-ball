@@ -11,6 +11,7 @@ import { db, pool, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { logTaskError, logTaskStart, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
 import { resumeTaskById } from './generation.js'
+import { resumeSourceCleanupTask, SOURCE_CLEANUP_TYPE } from './source-cleanup.js'
 
 export async function recoverInterruptedTasks(): Promise<void> {
   const startedAt = Date.now()
@@ -57,7 +58,14 @@ export async function recoverInterruptedTasks(): Promise<void> {
           logTaskWarn('Recovery', 'claim-skipped', { id: task.id, reason: 'active worker lease' })
           continue
         }
-        if (task.type === 'video' && task.taskId) {
+        if (task.type === SOURCE_CLEANUP_TYPE) {
+          // 原文整理有独立检查点与费用语义：只能走自身恢复器，绝不落到
+          // 既有 image/video 的「非视频直接 failed」分支。
+          resumeSourceCleanupTask(task.id).catch(err => {
+            logTaskError('Recovery', 'source-cleanup-resume-failed', { id: task.id, error: err.message })
+          })
+          claimed++
+        } else if (task.type === 'video' && task.taskId) {
           // 不在扫描器里另写一套租约：resumeTaskById -> processTask 会对正常任务和恢复任务
           // 使用同一个条件更新认领；认领失败者直接退出，避免滚动重启时重复续轮询。
           resumeTaskById(task.id).catch(err => {
