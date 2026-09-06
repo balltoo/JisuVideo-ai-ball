@@ -11,6 +11,7 @@ import { pool, getInsertId } from '../db/index.js'
 import { getActiveConfigWithId, getConfigById } from './ai.js'
 import { sourceVersionContentHash } from './source-versions.js'
 import { acquireAiRequest } from './request-guard.js'
+import { ensureSourceAnchorsInTransaction } from './source-anchors.js'
 
 export const SOURCE_CLEANUP_TYPE = 'source_cleanup'
 export const SOURCE_CLEANUP_MAX_CHARS = 200_000
@@ -48,6 +49,7 @@ export interface SourceCleanupAdapterInput {
   dramaId: number
   inputVersionId: number
   inputContentHash: string
+  configId: number
   content: string
   chunk: { index: number; start: number; end: number; text: string }
 }
@@ -57,9 +59,11 @@ export type SourceCleanupAdapter = (input: SourceCleanupAdapterInput) => Promise
 // #73 会在 Agent 注册后设置正式适配器。导出测试 setter 是为了让 CI 覆盖真实
 // 生命周期而不触发任何收费模型请求。
 let cleanupAdapter: SourceCleanupAdapter | null = null
-export function setSourceCleanupAdapterForTests(adapter: SourceCleanupAdapter | null): void {
+export function registerSourceCleanupAdapter(adapter: SourceCleanupAdapter | null): void {
   cleanupAdapter = adapter
 }
+// 兼容既有测试调用名；生产注册统一使用 registerSourceCleanupAdapter。
+export const setSourceCleanupAdapterForTests = registerSourceCleanupAdapter
 export function isSourceCleanupAdapterReady(): boolean {
   return cleanupAdapter !== null
 }
@@ -383,7 +387,7 @@ export async function runSourceCleanupTask(taskId: number): Promise<void> {
       let proposal: SourceCleanupProposal
       try {
         proposal = await cleanupAdapter!({
-          taskId, dramaId: Number(task.drama_id), inputVersionId: Number(input.id), inputContentHash: String(input.content_hash), content, chunk,
+          taskId, dramaId: Number(task.drama_id), inputVersionId: Number(input.id), inputContentHash: String(input.content_hash), configId: Number(meta.config_id), content, chunk,
         })
       } finally {
         gate.release()
@@ -433,6 +437,9 @@ async function completeSourceCleanupTask(taskId: number, dramaId: number, inputV
       [dramaId, cleaned, contentHash, inputHash, inputVersionId, JSON.stringify({ removals }), JSON.stringify({ removed_chars: removals.reduce((sum, item) => sum + item.end - item.start, 0), removal_count: removals.length }), ts, ts],
     )
     const cleanedVersionId = getInsertId(insert)
+    // cleaned 版本刚创建即在同一事务生成其专属锚点；未确认候选只拥有自身锚点，
+    // 不会改 dramas.current_source_version_id 或污染当前正文消费者。
+    await ensureSourceAnchorsInTransaction(conn, dramaId, cleanedVersionId)
     params.source_cleanup = {
       ...(params.source_cleanup || {}), phase: 'ready', cleaned_version_id: cleanedVersionId,
       checkpoint: { ...(params.source_cleanup?.checkpoint || {}), next_chunk_index: params.source_cleanup?.checkpoint?.chunk_count || 1, inflight_chunk_index: null, submission_state: 'not_submitted', task_id: null, removals },
