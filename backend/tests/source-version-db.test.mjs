@@ -194,13 +194,12 @@ test('懒生成：事务内锁 dramas 行 + 锁内判定已有版本行则跳过
   assert.match(src.slice(start), /\} catch \(err\)[\s\S]*?await connection\.rollback\(\)/)
 })
 
-test('懒生成：不新建业务端点，仅在 analyze-episodes 携带正文处接线（契约 §6.3 触发点）', () => {
+test('懒生成：analyze-episodes 与 #72 原文整理入口均可接线，但版本操作仍未越界', () => {
   const routes = read('src/routes/dramas.ts')
-  assert.match(routes, /import \{ ensureSourceVersion, SourceContentConflict \} from '\.\.\/services\/source-versions\.js'/)
+  assert.match(routes, /import \{ ensureSourceVersion,[\s\S]*?SourceContentConflict \} from '\.\.\/services\/source-versions\.js'/)
   assert.match(routes, /await ensureSourceVersion\(id, content\)/)
-  // Issue #71 明确不做：不得新增 source 业务端点
+  // #72 新增健康检查/清理入口；versions/confirm/switch 仍归后续任务。
   assert.doesNotMatch(routes, /source\/versions/, '不得新增 GET /source/versions（归 #72）')
-  assert.doesNotMatch(routes, /source\/clean/, '不得新增 /source/clean（归 #72）')
   assert.doesNotMatch(routes, /source\/confirm/, '不得新增 /source/confirm（归 #72）')
   assert.doesNotMatch(routes, /source\/switch/, '不得新增 /source/switch（归 #72）')
 })
