@@ -1,0 +1,3 @@
+# Issue #80 / S1 baseline 样本与 ground-truth：字节级固定（UTF-8 无 BOM、LF），
+# 禁止 git 行尾自动转换（core.autocrlf / eol 均不生效），保证 fileSha256/contentHash 稳定可复核。
+backend/tests/fixtures/source-baseline/** -text
