@@ -5,13 +5,14 @@ import assert from 'node:assert/strict'
 const root = new URL('..', import.meta.url)
 const read = (path) => readFileSync(new URL(path, root), 'utf8')
 
-test('useApi exposes the four source-version write-path methods on the merged endpoints', () => {
+test('useApi exposes the three source-version write-path methods on the merged endpoints', () => {
   const api = read('app/composables/useApi.ts')
 
   assert.match(api, /confirmSource: \(id: number, data: \{ target_version_id: number; expected_current_version_id: number \| null \}\) => api\.post\(`\/dramas\/\$\{id\}\/source\/confirm`, data\)/)
   assert.match(api, /skipSource: \(id: number, note\?: string\) => api\.post\(`\/dramas\/\$\{id\}\/source\/skip`, \{ note \}\)/)
   assert.match(api, /switchSourceVersion: \(id: number, data: \{ target_version_id: number; expected_current_version_id: number \| null \}\) => api\.post\(`\/dramas\/\$\{id\}\/source\/switch`, data\)/)
-  assert.match(api, /updateCurrentSource: \(id: number, data: \{ expected_current_version_id: number; content: string; note\?: string \}\) => api\.put\(`\/dramas\/\$\{id\}\/source\/current`, data\)/)
+  // updateCurrentSource (edit current text) is deferred to 74-B-2 and must not be present yet
+  assert.doesNotMatch(api, /updateCurrentSource/)
 })
 
 test('SourceCleanupCard renders confirm/skip/switch actions guarded by backend semantics', () => {
