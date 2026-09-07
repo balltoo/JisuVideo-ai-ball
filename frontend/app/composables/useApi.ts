@@ -63,6 +63,11 @@ export const dramaAPI = {
   sourceHealthCheck: (id: number) => api.post(`/dramas/${id}/source/health-check`, {}),
   startSourceCleanup: (id: number) => api.post(`/dramas/${id}/source/clean`, {}),
   sourceVersions: (id: number) => api.get(`/dramas/${id}/source/versions`),
+  // 原文版本写路径（#74-B）：对接后端 PR #86/#87 已合并端点，expected_current_version_id 为 CAS 乐观锁（可空）
+  // 编辑当前正文（PUT /source/current）延后到 74-B-2 再补
+  confirmSource: (id: number, data: { target_version_id: number; expected_current_version_id: number | null }) => api.post(`/dramas/${id}/source/confirm`, data),
+  skipSource: (id: number, note?: string) => api.post(`/dramas/${id}/source/skip`, { note }),
+  switchSourceVersion: (id: number, data: { target_version_id: number; expected_current_version_id: number | null }) => api.post(`/dramas/${id}/source/switch`, data),
   analyzeEpisodes: (id: number, data: { content: string; episode_count?: number; resolution: string; expected_version: number; requirement?: string; review_notes?: Array<{ episode_number: number; title?: string; summary?: string; note: string }> }) => api.post(`/dramas/${id}/analyze-episodes`, data),
   getEpisodePlan: (id: number) => api.get(`/dramas/${id}/episode-plan`),
   saveEpisodePlan: (id: number, data: { source_content: string; plan: any; resolution: string; selected_episode_number?: number | null; expected_version: number }) => api.put(`/dramas/${id}/episode-plan`, data),
