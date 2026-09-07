@@ -71,6 +71,13 @@
 |---|---|---|---|
 | HB-20260905-01 | Issue #67：事实源、看板映射与协调边界 | 已合入（PR #70，merge `59bf68a`，2026-09-05T14:46:33Z）；协作计划新增 §10.1/§10.2/§10.3/附录 A；Projects #1（PVT_kwHODc-qWM4BgT-r）建立 4 字段 + 2 视图 + 3 Issue；Auto-close issue 反向关闭已停用并回读 enabled=false；其余 5 个工作流保持启用；owner 裁决标签同步=人工同步（#67 issuecomment-5551869432）；Fork 访问验证通过；#67 已关闭，看板 Status 最终为 Done（不推断触发工作流） | [查看日志](./2026-09-05-coordination-hardening.md) |
 
+## 2026-09-07
+
+| 编号 | 迭代 | 状态 | 详细日志 |
+|---|---|---|---|
+| HB-20260907-01 | Issue #75 S2 文本全链路验收——clean/confirm/health/analyze 逐字质量门 + gpt 系模型能力边界对照（含 lease bug 修复） | 验收执行完毕（2026-09-07）：drama13（1665 字含噪）S2 全链通过、drama9（31045 字）三 gpt 模型 12k 块逐字失配 / astra hang 标记模型能力边界外、S3 中断契约通过；修复 clean worker 租约误杀 bug；报告含「UI 开发支持范围提醒」专章 | [查看验收报告](../2026-09-07-issue75-s2-acceptance-report.md) |
+| HB-20260907-02 | 长文主流程收口——外部处理、短剧生产包导入与项目圣经统筹 | 已完成方向与实施规格；不再将平台内去噪作为长文必经路径，下一步单列生产包导入最小契约 | [查看实施方案](../long-form-production-package-plan.md) |
+
 ## 记录规范
 
 每篇日志至少包含：
