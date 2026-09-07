@@ -174,6 +174,8 @@
         </aside>
       </div>
 
+      <SourceCleanupCard ref="sourceCleanupRef" :drama-id="dramaId" />
+
       <section class="card episode-planner-card">
         <div class="episode-planner-head">
           <div>
@@ -865,6 +867,7 @@ import { dramaAPI, episodeAPI, characterAPI, sceneAPI, propAPI, uploadAPI, style
 import BaseSelect from '~/components/BaseSelect.vue'
 import AppDialog from '~/components/AppDialog.vue'
 import StatusBadge from '~/components/StatusBadge.vue'
+import SourceCleanupCard from '~/components/SourceCleanupCard.vue'
 import { isServerPlanGenerated } from '~/utils/episode-plan-state.mjs'
 
 const route = useRoute()
@@ -898,6 +901,7 @@ const episodePlanRevisionCount = ref(0)
 const episodePlanSaving = ref(false)
 const episodePlanDirty = ref(false)
 const episodePlanConflict = ref(false)
+const sourceCleanupRef = ref(null)
 // 重新加载服务器版本的三态：失败内联提示（原为未捕获 rejection）
 const reloadPlanLoading = ref(false)
 const episodePlanReloadError = ref('')
@@ -1466,6 +1470,7 @@ async function load(initial = false) {
       resolution: metadata.default_resolution === '480p' ? '480p' : '720p',
     })
     await reloadServerEpisodePlan()
+    await sourceCleanupRef.value?.loadSourceVersions()
   } catch (e) {
     if (initial) { pageLoadError.value = e.message || '加载失败'; return }
     toast.error(e.message)
