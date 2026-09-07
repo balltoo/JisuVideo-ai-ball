@@ -54,7 +54,9 @@ test('drama routes expose safe link import, AI episode planning and controlled d
   assert.match(route, /generated_episode_ids/)
   assert.match(route, /VERSION_CONFLICT/)
   assert.match(route, /FOR UPDATE/)
-  assert.match(route, /sourceHash\(drama\.description\)/)
+  // #79：分集草稿与最终生成必须以当前有效正文校验，不能固定回读初始 description。
+  assert.match(route, /effectiveSourceText/)
+  assert.match(route, /sourceHash\(effectiveSourceText\)/)
   assert.match(route, /已经进入剧本、分镜或制作阶段/)
   assert.match(route, /getActiveConfigId\('image'\)/)
   assert.match(route, /review_notes/)
