@@ -1,4 +1,4 @@
-# Issue #75 S2 文本全链路验收报告（含 UI 支持范围提醒）
+# Issue #75 S2 原文整理兼容链路验收报告（含 UI 支持范围提醒）
 
 > - 分支：`feat/issue-75-s2-e2e-acceptance`（fork：origin = Aibrother258/JisuVideo-ai）
 > - 基线：`d9eddb2`（Merge PR #91）
@@ -6,6 +6,18 @@
 > - 关联契约：`docs/source-intelligence-episode-planning-v0.4.md`（v0.4-rev9，Issue #78 收口）
 > - 范围：clean → confirm → health → analyze 文本全链路逐字质量门验收；新增 gpt 系模型（fhl.mom 网关）能力边界对照
 > - 运行时证据：`.local/e2e75/evidence.jsonl`（本目录不入库，按需归档）
+
+---
+
+## 〇、与当前长文主路线的关系（2026-09-07 复盘订正）
+
+本报告保留为一次**兼容能力的真实运行证据**，不再作为“平台内长文去噪/分集是正式主流程”的验收结论。后续长文主流程以
+[`long-form-production-package-plan.md`](long-form-production-package-plan.md) 为准：外部工具先完成去噪、校对和初步分集，平台导入已准备内容或短剧生产包，再由项目圣经统筹后续生产。
+
+- 本报告已证明：短文本可选整理、版本确认/人工编辑/切换、失败不虚报及 worker 租约恢复等底层能力可作为旧项目和辅助检查路径继续保留。
+- 本报告**没有证明**：任意长篇网文可以在平台内稳定自动去噪，更没有证明平台内去噪应成为导入长文的必经步骤。
+- drama 9 的 3 万字失败不是要靠继续扩大平台内清理功能来“补过验收”；它恰好说明长文应先在外部工具完成处理。本报告中的长度、模型和 UI 提示仅约束旧的“AI 整理原文”辅助入口，不构成新建长文项目的默认流程。
+- 因此，#75 的历史证据可以用于回归测试和兼容性维护；长文生产主线的端到端验收要在“生产包导入 → 项目圣经 → 全局资产 → 生产”的代表项目跑通后另行建立，不能拿本报告替代。
 
 ---
 
@@ -59,19 +71,19 @@ estimate → analyze（复用既有 plan v1）→ plan reviewed v2 → 生成 3 
 
 **问题**：`runSourceCleanupTask` claim 时写入一次性 60s 活跃租约，且清理过程从不续期。慢文本模型（gpt-5.6-luna 等）单块调用可达分钟级，60s 后恢复服务每轮扫描都会把**仍在工作的 worker** 误判为中断并按 `UNSAFE_RECOVERY` 安全失败，任务不可自动完成。
 
-**修复**（`backend/src/services/source-cleanup.ts`，工作区改动，未提交）：
+**修复**（`backend/src/services/source-cleanup.ts`，已由 PR #92 合入）：
 - 新增常量 `SOURCE_CLEANUP_LEASE_MS = 300_000`；
 - claim 时写入 `claimAt + SOURCE_CLEANUP_LEASE_MS`；
 - `updateCleanupCheckpoint` 每次 checkpoint 同时把 `recovery_at` 续期到 `Date.now() + SOURCE_CLEANUP_LEASE_MS`。
 
 **验证**：修复后 task 81 完整跑完 3 个 chunk（约 2 分钟+）不再被误杀；每 60s 的恢复扫描均 `claim-skipped | reason=active worker lease`。
 
-## 五、决策 C：验收口径收窄
+## 五、兼容能力的验收口径
 
 - **drama 13（1665 字含噪短文本）作为 S2 通过样本**（全链 + 一致性断言通过）。
 - **drama 9（31045 字）等大文本 clean 标记「模型能力边界外」**：当前可用文本模型（flash-lite/deepseek/glm 配额耗尽，fhl.mom gpt 系大块失配/astra hang）均无法稳定满足 12k 分块的逐字质量门。属**外部模型能力约束**，非后端逻辑缺陷（后端在同一消息构造下的失配形态可在 diag 复现，且失败均为预期代码路径）。
-- **支持范围现状**（后端可对外承诺）：
-  - 全自动 clean：可靠上限约 **2k 字级文本**（已验证）；分块上限当前为 `SOURCE_CLEANUP_CHUNK_SIZE=12_000`，但 >6.8k 块逐字转录通过率不稳定，需配合小分块或更强模型。
+- **支持范围现状**（兼容入口的已观测证据，不是对外能力承诺）：
+  - 已有一条 **1665 字**含噪样本在非默认 gpt-5.6-luna 配置下全链通过；它不足以推导“约 2k 字可靠上限”。默认 flash-lite 配置也尚未满足相同质量门。分块上限当前为 `SOURCE_CLEANUP_CHUNK_SIZE=12_000`，但 >6.8k 块逐字转录通过率不稳定，需配合小分块或更强模型。此处仅描述兼容入口的已知边界，不是长文产品能力承诺。
   - 中断恢复契约（S3）：已验证可用。
   - 任务取消/未知送达：UI 需引导人工核对重发，不得自动重发。
 
@@ -88,9 +100,9 @@ estimate → analyze（复用既有 plan v1）→ plan reviewed v2 → 生成 3 
 
 ---
 
-## 七、UI 开发支持范围提醒（重要）
+## 七、兼容入口的 UI 支持范围提醒（重要）
 
-以下约束在 **UI 开发/联调阶段必须清晰呈现**，避免界面让用户发起必然失败或语义误导的操作。
+以下约束只适用于“AI 整理原文”兼容入口的 UI 开发/联调，避免界面让用户发起必然失败或语义误导的操作；它们不应被复制为长文导入或短剧生产包入口的前置条件。
 
 ### 7.1 能力边界（UI 呈现口径）
 1. **AI 整理原文**是「去噪不改写」：只删除广告/水印/重复等噪声区间，结果可预览、可复现、可回退。UI 不得宣称「改写/润色」。
