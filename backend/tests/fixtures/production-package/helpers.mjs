@@ -45,6 +45,13 @@ export function normalizeFileBytes(raw) {
   if (Buffer.compare(raw.subarray(0, 3), BOM) === 0) {
     throw new Error('PACKAGE_ENCODING_INVALID: UTF-8 BOM is not allowed')
   }
+  // TextDecoder({ fatal: true }) 会把 `61 00 62 00` 当作合法 UTF-8 的
+  // `a\0b\0`，因此单靠 UTF-8 解码无法识别无 BOM 的 UTF-16LE/BE。
+  // 生产包是 Markdown 文本，NUL 不属于允许内容；先拒绝它，既挡住常见
+  // UTF-16 又避免把二进制数据带进后续的 Markdown/指纹流程。
+  if (raw.includes(0x00)) {
+    throw new Error('PACKAGE_ENCODING_INVALID: NUL byte / binary or UTF-16 content is not allowed')
+  }
   if (!isValidUtf8(raw)) {
     throw new Error('PACKAGE_ENCODING_INVALID: file is not valid UTF-8')
   }
@@ -191,6 +198,7 @@ function walkRelPaths(root) {
  *   delete        —— 删除文件
  *   replace       —— 字符串替换（{find, with}）
  *   binary        —— 前置 BOM 字节（用于 B5 编码阻断）
+ *   utf16le       —— 将完整文本写成无 BOM 的 UTF-16LE（用于 B11 编码阻断）
  *   duplicate-id  —— 把某个区块标题改成已存在的 external_id
  *   insert-after  —— 在锚点后插入一行（未知 front matter 字段）
  *   replace-section —— 从锚点标题到文件末尾整体替换
@@ -210,6 +218,12 @@ export function applyMutation(destRoot, spec) {
       {
         const abs = path.join(destRoot, spec.target)
         fs.writeFileSync(abs, Buffer.concat([Buffer.from(spec.prefix), fs.readFileSync(abs)]))
+      }
+      return
+    case 'utf16le':
+      {
+        const abs = path.join(destRoot, spec.target)
+        fs.writeFileSync(abs, Buffer.from(fs.readFileSync(abs, 'utf-8'), 'utf16le'))
       }
       return
     case 'duplicate-id':

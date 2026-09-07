@@ -124,6 +124,15 @@ test('T01c 空文件规范化为恰好一个 LF', () => {
   assert.equal(out.length, 1)
 })
 
+test('T01d 无 BOM 的 UTF-16LE / 含 NUL 二进制内容必须拒绝', () => {
+  const utf16leWithoutBom = Buffer.from('abc', 'utf16le')
+  assert.throws(
+    () => h.normalizeFileBytes(utf16leWithoutBom),
+    /PACKAGE_ENCODING_INVALID/,
+    '不能把 a\\0b\\0c\\0 当作合法 UTF-8 Markdown',
+  )
+})
+
 test('T01c 返回值必须是独立内存，不共享底层 buffer', () => {
   const raw = Buffer.from('abc\n')
   const out = h.normalizeFileBytes(raw)
@@ -187,7 +196,7 @@ test('T02b 可选文件存在时，正例人物/场景引用完整', () => {
 
 // ─────────────────────────── A. 负例指纹不变量 ───────────────────────────
 
-test('负例矩阵完整性：9 条阻断 + 5 条警告 + 4 条 confirm 阶段', () => {
+test('负例矩阵完整性：11 条阻断 + 5 条警告 + 4 条 confirm 阶段', () => {
   const errors = NEGATIVES.filter((n) => n.severity === 'error')
   const warnings = NEGATIVES.filter((n) => n.severity === 'warning')
   // 按 ID 前缀分类：B = 解析阻断，W = 警告，C = confirm 阶段（哈希比对 + 冲突/幂等）。
@@ -196,9 +205,9 @@ test('负例矩阵完整性：9 条阻断 + 5 条警告 + 4 条 confirm 阶段',
   const confirm = errors.filter((n) => n.id.startsWith('C'))
 
   assert.equal(warnings.length, 5, `警告应为 5 条，实际 ${warnings.length}`)
-  assert.equal(blocking.length, 9, `阻断应为 9 条，实际 ${blocking.length}`)
+  assert.equal(blocking.length, 11, `阻断应为 11 条，实际 ${blocking.length}`)
   assert.equal(confirm.length, 4, `confirm 阶段应为 4 条（C1/C2 哈希 + C3/C4 冲突），实际 ${confirm.length}`)
-  assert.equal(NEGATIVES.length, 18, `矩阵总数应为 18，实际 ${NEGATIVES.length}`)
+  assert.equal(NEGATIVES.length, 20, `矩阵总数应为 20，实际 ${NEGATIVES.length}`)
 })
 
 test('Issue #96 交付 2 点名的 8 项负例逐条有覆盖', () => {
@@ -208,7 +217,7 @@ test('Issue #96 交付 2 点名的 8 项负例逐条有覆盖', () => {
     '剧集号重复/跳号': 'B4',
     '角色引用缺失': 'B7',
     '场景引用缺失': 'B9',
-    '正文为空': 'W4',
+    '正文为空': 'B10',
     '未知字段': 'W3',
     '来源 hash 不一致': 'C2',
     '导入更新冲突': 'C3',
@@ -342,7 +351,7 @@ test('每条负例都登记了契约引用与阻断/警告分级', () => {
   for (const spec of NEGATIVES) {
     assert.ok(spec.id, `[${spec.id}] 必须登记 id`)
     // code 允许为 null：契约 §7 没有对应错误码的情形（可选文件缺失、未识别字段、
-    // 正文为空）——它们必须无 error 产出，而不是被硬套一个错误码。
+    // Drama Bible 为空）——它们必须无 error 产出，而不是被硬套一个错误码。
     assert.ok(
       spec.code === null || Object.values(CODE).includes(spec.code),
       `[${spec.id}] code 必须是 §7 表格内的值或 null`,

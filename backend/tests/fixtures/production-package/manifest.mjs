@@ -85,7 +85,7 @@ export const EXPECTED = {
 }
 
 /**
- * 负例矩阵：9 条阻断 + 5 条警告 + 4 条 confirm 阶段（哈希比对 2 + 冲突/幂等 2）。
+ * 负例矩阵：11 条阻断 + 5 条警告 + 4 条 confirm 阶段（哈希比对 2 + 冲突/幂等 2）。
  *
  * 每例给出**变异操作**与**该变异后的可复算真值**。真值存在的意义是：
  * 断言不能只看「返回失败」，必须验证**哪一段指纹变了、哪一段不变**。
@@ -118,7 +118,7 @@ export const NEGATIVES = [
   {
     id: 'B3',
     severity: 'error',
-    code: CODE.MANIFEST_INVALID,
+    code: CODE.FILE_MISSING,
     contract: 'T03 / §3.1',
     mutate: 'delete',
     target: 'source-manifest.md',
@@ -200,6 +200,29 @@ export const NEGATIVES = [
     expect: { packageFingerprintChanges: true, validationFingerprintChanges: true, canonicalHashChanges: false },
     note: '与 B7 成对：B7 改 Scene Refs 里的 S001→S999（场景侧），B9 改 Character Refs 里的 C001→C999（角色侧）。Issue #96 列了「角色引用缺失」，契约 §7 却只给一个 PACKAGE_REFERENCE_UNKNOWN；解析器若只校验一侧引用清单就会漏掉另一侧。',
   },
+  {
+    id: 'B10',
+    severity: 'error',
+    code: CODE.EPISODE_INVALID,
+    contract: '§3.3 / §7',
+    mutate: 'replace-section',
+    target: 'episodes/001.md',
+    replaceSection: { heading: '## Content', with: '## Content\n' },
+    expected: 'episodes/001.md 的 ## Content 正文为空；必须阻断并返回 PACKAGE_EPISODE_INVALID',
+    expect: { packageFingerprintChanges: true, validationFingerprintChanges: true, canonicalHashChanges: true },
+    note: '契约要求每个 episodes/NNN.md 的 ## Content 正文非空；这不是 drama-package.md 的 Drama Bible 内容质量警告。',
+  },
+  {
+    id: 'B11',
+    severity: 'error',
+    code: CODE.ENCODING_INVALID,
+    contract: '§3.2 / §7',
+    mutate: 'utf16le',
+    target: 'episodes/002.md',
+    expected: '无 BOM 的 UTF-16LE 仍必须按非 UTF-8/二进制内容拒绝',
+    expect: { rejectsRead: true },
+    note: 'TextDecoder 的 fatal UTF-8 解码会接受包含 NUL 的 UTF-16LE 字节；实现必须先拒绝 NUL/binary 内容。',
+  },
 
   // ─────────────────────────── 5 条警告 ───────────────────────────
   {
@@ -243,7 +266,7 @@ export const NEGATIVES = [
   {
     id: 'W4',
     severity: 'warning',
-    code: null, // 正文为空是内容质量问题，不是 front matter 结构错误；不得产出 error
+    code: null, // Drama Bible 为空是内容质量问题，不是 episode Content 的结构错误；不得产出 error
     contract: '§3.3',
     mutate: 'replace-section',
     target: 'drama-package.md',
