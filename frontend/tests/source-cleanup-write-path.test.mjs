@@ -5,14 +5,14 @@ import assert from 'node:assert/strict'
 const root = new URL('..', import.meta.url)
 const read = (path) => readFileSync(new URL(path, root), 'utf8')
 
-test('useApi exposes the three source-version write-path methods on the merged endpoints', () => {
+test('useApi exposes the source-version write-path methods incl edit-current on the merged endpoints', () => {
   const api = read('app/composables/useApi.ts')
 
   assert.match(api, /confirmSource: \(id: number, data: \{ target_version_id: number; expected_current_version_id: number \| null \}\) => api\.post\(`\/dramas\/\$\{id\}\/source\/confirm`, data\)/)
   assert.match(api, /skipSource: \(id: number, note\?: string\) => api\.post\(`\/dramas\/\$\{id\}\/source\/skip`, \{ note \}\)/)
   assert.match(api, /switchSourceVersion: \(id: number, data: \{ target_version_id: number; expected_current_version_id: number \| null \}\) => api\.post\(`\/dramas\/\$\{id\}\/source\/switch`, data\)/)
-  // updateCurrentSource (edit current text) is deferred to 74-B-2 and must not be present yet
-  assert.doesNotMatch(api, /updateCurrentSource/)
+  // 74-B-2: editing the current text maps to PUT /source/current with a non-nullable CAS pointer
+  assert.match(api, /updateCurrentSource: \(id: number, data: \{ expected_current_version_id: number; content: string; note\?: string \}\) => api\.put\(`\/dramas\/\$\{id\}\/source\/current`, data\)/)
 })
 
 test('SourceCleanupCard renders confirm/skip/switch actions guarded by backend semantics', () => {
@@ -79,4 +79,31 @@ test('SourceCleanupCard surfaces skipped state and keeps preview/read path intac
   assert.match(card, /健康检查/)
   assert.match(card, /开始整理/)
   assert.match(card, /source-version-preview/)
+})
+
+test('SourceCleanupCard edit entry only on confirmed/user-edited current, prefilled with full text, saves via PUT current', () => {
+  const card = read('app/components/SourceCleanupCard.vue')
+
+  // edit is offered only when the effective version is confirmed or user-edited (backend base_kind rule)
+  assert.match(card, /const canEditCurrent = computed/)
+  assert.match(card, /\['confirmed', 'user-edited'\]\.includes\(sourceVersionCurrentKind\.value\)/)
+  assert.match(card, /v-if="canEditCurrent && !sourceEditing"/)
+  assert.match(card, /@click="beginEditCurrent"/)
+
+  // prefill = the FULL content of the current version row (text must never be truncated before edit)
+  assert.match(card, /const currentEditableContent = computed/)
+  assert.match(card, /sourceVersions\.value\.find\(v => Number\(v\.id\) === Number\(id\)\)/)
+  assert.match(card, /:maxlength="200000"/)
+  assert.match(card, /编辑当前正文/)
+
+  // saving issues PUT /source/current with the non-nullable expected pointer, full content and optional note
+  assert.match(card, /async function saveEditCurrent\(\)/)
+  assert.match(card, /updateCurrentSource\(props\.dramaId/)
+  assert.match(card, /expected_current_version_id: currentId/)
+  assert.match(card, /note: sourceEditNote\.value\?\.trim\(\) \|\| undefined/)
+  assert.match(card, /正文不能为空/)
+
+  // 409 conflict keeps the editor open (no silent overwrite); success path closes it
+  assert.match(card, /if \(!sourceConflict\.value\)/)
+  assert.match(card, /cancelEditCurrent\(\)/)
 })
