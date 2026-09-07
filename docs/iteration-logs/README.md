@@ -75,8 +75,9 @@
 
 | 编号 | 迭代 | 状态 | 详细日志 |
 |---|---|---|---|
-| HB-20260907-01 | Issue #75 S2 文本全链路验收——clean/confirm/health/analyze 逐字质量门 + gpt 系模型能力边界对照（含 lease bug 修复） | 验收执行完毕（2026-09-07）：drama13（1665 字含噪）S2 全链通过、drama9（31045 字）三 gpt 模型 12k 块逐字失配 / astra hang 标记模型能力边界外、S3 中断契约通过；修复 clean worker 租约误杀 bug；报告含「UI 开发支持范围提醒」专章 | [查看验收报告](../2026-09-07-issue75-s2-acceptance-report.md) |
+| HB-20260907-01 | Issue #75 S2 原文整理兼容链路验收——clean/confirm/health/analyze 逐字质量门 + gpt 系模型能力边界对照（含 lease bug 修复） | 兼容链路验收已执行（2026-09-07）：drama13（1665 字含噪）S2 全链通过、drama9（31045 字）三 gpt 模型 12k 块逐字失配 / astra hang、S3 中断契约通过；修复 clean worker 租约误杀 bug。该证据不再等同长文主流程验收，长文主线改走生产包导入与项目圣经 | [查看验收报告](../2026-09-07-issue75-s2-acceptance-report.md) |
 | HB-20260907-02 | 长文主流程收口——外部处理、短剧生产包导入与项目圣经统筹 | 已完成方向与实施规格；不再将平台内去噪作为长文必经路径，下一步单列生产包导入最小契约 | [查看实施方案](../long-form-production-package-plan.md) |
+| HB-20260907-03 | 近期迭代与长文主路线复盘订正 | #86–#92 保留为版本管理/兼容整理能力；#75 不再作为平台内长文主流程验收；路线图改为先做生产包导入与项目圣经，随后才做上下文和全局资产接线 | [查看生产包方案](../long-form-production-package-plan.md) |
 
 ## 记录规范
 
