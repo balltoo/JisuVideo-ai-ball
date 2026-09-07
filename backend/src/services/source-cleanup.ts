@@ -14,6 +14,9 @@ import { acquireAiRequest } from './request-guard.js'
 import { ensureSourceAnchorsInTransaction } from './source-anchors.js'
 
 export const SOURCE_CLEANUP_TYPE = 'source_cleanup'
+/** worker 活跃租约：claim 与每次 checkpoint 均续期至此。慢文本模型（如 gpt-5.6-luna）单块调用可达分钟级，
+ *  若仅靠初始 60s 租约，恢复服务会把仍在工作的 worker 误判为中断并安全失败（UNSAFE_RECOVERY）。 */
+export const SOURCE_CLEANUP_LEASE_MS = 300_000
 export const SOURCE_CLEANUP_MAX_CHARS = 200_000
 export const SOURCE_CLEANUP_CHUNK_SIZE = 12_000
 export const REMOVAL_CATEGORIES = ['ad', 'watermark', 'duplicate', 'garbage'] as const
@@ -342,7 +345,10 @@ async function updateCleanupCheckpoint(taskId: number, patch: Record<string, unk
     phase: patch.phase || params.source_cleanup.phase,
     checkpoint: { ...(params.source_cleanup.checkpoint || {}), ...(patch.checkpoint || {}) },
   }
-  await pool.query('UPDATE sys_task SET params = ?, updated_at = ? WHERE id = ? AND type = ? AND status = ?', [JSON.stringify(params), now(), taskId, SOURCE_CLEANUP_TYPE, 'processing'])
+  await pool.query(
+    'UPDATE sys_task SET params = ?, recovery_at = ?, updated_at = ? WHERE id = ? AND type = ? AND status = ?',
+    [JSON.stringify(params), String(Date.now() + SOURCE_CLEANUP_LEASE_MS), now(), taskId, SOURCE_CLEANUP_TYPE, 'processing'],
+  )
 }
 
 /** 执行已创建的任务；#73 注册适配器前不会触发该路径。 */
@@ -353,7 +359,7 @@ export async function runSourceCleanupTask(taskId: number): Promise<void> {
     `UPDATE sys_task SET recovery_at = ?, recovery_owner = ?, updated_at = ?
      WHERE id = ? AND type = ? AND status = 'processing'
        AND (recovery_at IS NULL OR recovery_at = '' OR CAST(recovery_at AS UNSIGNED) < ?)`,
-    [String(claimAt + 60_000), owner, now(), taskId, SOURCE_CLEANUP_TYPE, claimAt],
+    [String(claimAt + SOURCE_CLEANUP_LEASE_MS), owner, now(), taskId, SOURCE_CLEANUP_TYPE, claimAt],
   )
   if (Number((claim as any)?.affectedRows || 0) !== 1) return
   try {
