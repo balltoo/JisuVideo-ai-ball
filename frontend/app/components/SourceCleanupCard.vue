@@ -135,6 +135,66 @@ function skipCleanup() {
   return runVersionAction('skip', () => dramaAPI.skipSource(props.dramaId), '已跳过整理，保留原文')
 }
 
+// ── 74-B-2 编辑当前正文：仅在当前生效版本为 confirmed/user-edited 时允许（对齐后端
+//    PUT /source/current 的 base_kind 校验）；保存走统一执行器，409 只刷新复核。
+const sourceEditing = ref(false)
+const sourceEditContent = ref('')
+const sourceEditNote = ref('')
+const sourceEditError = ref('')
+
+const canEditCurrent = computed(() => {
+  return ['confirmed', 'user-edited'].includes(sourceVersionCurrentKind.value) && sourceVersionCurrentId.value !== null
+})
+
+// 编辑器预填 = 当前生效版本行的完整 content（版本列表每行都是全文；若被截断会在读取层另行处理）
+const currentEditableContent = computed(() => {
+  const id = sourceVersionCurrentId.value
+  if (id === null) return ''
+  const row = sourceVersions.value.find(v => Number(v.id) === Number(id))
+  return row?.content ?? ''
+})
+
+function beginEditCurrent() {
+  sourceEditError.value = ''
+  sourceEditing.value = true
+  sourceEditContent.value = currentEditableContent.value
+  sourceEditNote.value = ''
+}
+
+function cancelEditCurrent() {
+  sourceEditing.value = false
+  sourceEditContent.value = ''
+  sourceEditNote.value = ''
+  sourceEditError.value = ''
+}
+
+async function saveEditCurrent() {
+  const content = sourceEditContent.value
+  if (!content?.trim()) {
+    sourceEditError.value = '正文不能为空'
+    return
+  }
+  sourceEditError.value = ''
+  const currentId = sourceVersionCurrentId.value
+  if (currentId === null) {
+    sourceEditError.value = '当前没有可编辑的生效版本'
+    return
+  }
+  await runVersionAction(
+    'edit',
+    () => dramaAPI.updateCurrentSource(props.dramaId, {
+      expected_current_version_id: currentId,
+      content,
+      note: sourceEditNote.value?.trim() || undefined,
+    }),
+    '已保存编辑，已自动生成人工编辑版本快照',
+  )
+  // 409 冲突时保持编辑面板打开，让用户看到横幅后自行决定继续编辑或刷新复核
+  if (!sourceConflict.value) {
+    cancelEditCurrent()
+  }
+}
+
 defineExpose({ loadSourceVersions })
 </script>
 
@@ -156,6 +216,13 @@ defineExpose({ loadSourceVersions })
         <button v-if="canSkip" type="button" class="btn btn-sm" :disabled="sourceActionPending !== null" @click="skipCleanup">
           {{ sourceActionPending === 'skip' ? '处理中…' : '跳过整理' }}
         </button>
+        <button
+          v-if="canEditCurrent && !sourceEditing"
+          type="button"
+          class="btn btn-sm"
+          :disabled="sourceActionPending !== null"
+          @click="beginEditCurrent"
+        >编辑当前正文</button>
       </div>
     </div>
     <div v-if="sourceCleanupError" class="source-cleanup-error">{{ sourceCleanupError }}</div>
@@ -176,6 +243,36 @@ defineExpose({ loadSourceVersions })
       <small v-if="sourceCleanupTask.message">{{ sourceCleanupTask.message }}</small>
     </div>
     <div v-if="sourceSkippedAt" class="source-skipped-strip">已跳过自动整理 · {{ new Date(sourceSkippedAt).toLocaleString() }}，当前保留原文</div>
+    <div v-if="sourceEditing" class="source-edit-panel">
+      <div class="source-edit-head">
+        <strong>编辑当前正文</strong>
+        <span>保存会新建一个「人工编辑」版本并切换为当前正文，原版本保留在历史里。</span>
+      </div>
+      <textarea
+        v-model="sourceEditContent"
+        class="source-edit-textarea"
+        :maxlength="200000"
+        spellcheck="false"
+        placeholder="在当前生效正文基础上修改…"
+      ></textarea>
+      <div class="source-edit-meta">
+        <span class="source-edit-count">{{ sourceEditContent.length.toLocaleString() }} / 200,000 字</span>
+        <input
+          v-model="sourceEditNote"
+          class="source-edit-note"
+          type="text"
+          maxlength="200"
+          placeholder="编辑说明（可选，≤200 字）"
+        />
+      </div>
+      <div v-if="sourceEditError" class="source-cleanup-error">{{ sourceEditError }}</div>
+      <div class="source-edit-actions">
+        <button type="button" class="btn btn-sm" :disabled="sourceActionPending !== null" @click="cancelEditCurrent">取消</button>
+        <button type="button" class="btn btn-primary btn-sm" :disabled="sourceActionPending !== null" @click="saveEditCurrent">
+          {{ sourceActionPending === 'edit' ? '保存中…' : '保存编辑' }}
+        </button>
+      </div>
+    </div>
     <div class="source-version-list">
       <div class="source-version-list-head"><span>版本历史</span><button type="button" class="link-btn" @click="refreshVersions">刷新</button></div>
       <div v-if="sourceVersionsLoading" class="source-version-empty">正在读取版本历史…</div>
@@ -238,4 +335,15 @@ defineExpose({ loadSourceVersions })
 .source-current-badge { background: var(--success-bg); color: var(--success); }
 .source-candidate-badge { background: color-mix(in srgb, var(--warning) 16%, var(--surface-raised)); color: var(--warning); }
 .source-version-preview { grid-column: 1 / -1; max-height: 220px; overflow: auto; margin: 0; padding: 11px; border-radius: 7px; background: var(--surface-paper-warm); color: var(--text-2); font-family: "Noto Serif SC", "Songti SC", serif; font-size: 11px; line-height: 1.7; white-space: pre-wrap; }
+.source-edit-panel { margin-top: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); }
+.source-edit-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.source-edit-head strong { color: var(--text-1); font-size: 11.5px; }
+.source-edit-head span { color: var(--text-3); font-size: 10px; line-height: 1.5; }
+.source-edit-textarea { width: 100%; min-height: 260px; max-height: 60vh; resize: vertical; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-paper-warm); color: var(--text-1); font-family: "Noto Serif SC", "Songti SC", serif; font-size: 12px; line-height: 1.75; }
+.source-edit-textarea:focus { outline: none; border-color: var(--accent); }
+.source-edit-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.source-edit-count { color: var(--text-3); font-family: var(--font-mono); font-size: 9px; }
+.source-edit-note { flex: 1; min-width: 200px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-1); color: var(--text-2); font-size: 11px; }
+.source-edit-note:focus { outline: none; border-color: var(--accent); }
+.source-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 </style>
