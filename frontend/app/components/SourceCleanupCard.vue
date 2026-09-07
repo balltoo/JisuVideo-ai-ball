@@ -1,4 +1,5 @@
 <script setup>
+import { computed, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { dramaAPI } from '~/composables/useApi'
 
@@ -23,6 +24,27 @@ const sourceConflict = ref('')
 
 function sourceVersionKindLabel(kind) {
   return ({ source: '原始正文', cleaned: '整理候选', confirmed: '已确认正文', 'user-edited': '人工编辑' })[kind] || kind
+}
+
+// 74-C diff/stats 副信息：展示每行在链上的位置与「本次整理改了啥」摘要。
+// 契约要点：cleaned 用自身 stats（建议删除）；confirmed 行自身是 identity diff，
+// 要看整理变化须读其 parent cleaned 的 stats，避免把空变更显示成删除/无变化。
+function sourceVersionExtra(version) {
+  const parts = []
+  const parentId = version.parent_version_id == null ? null : Number(version.parent_version_id)
+  const parent = parentId === null ? null : sourceVersions.value.find(v => Number(v.id) === parentId) || null
+  if (parent) parts.push(`基于 V${parentId}（${sourceVersionKindLabel(parent.kind)}）`)
+  const stats = version.stats || null
+  if (version.kind === 'cleaned' && stats) {
+    const removed = Number(stats.removed_chars || 0)
+    if (removed > 0) parts.push(`建议删除 ${removed.toLocaleString()} 字${Number(stats.removal_count || 0) ? `（${Number(stats.removal_count)} 处）` : ''}`)
+  } else if (version.kind === 'confirmed' && parent?.kind === 'cleaned') {
+    const removed = Number(parent.stats?.removed_chars || 0)
+    if (removed > 0) parts.push(`整理稿较原文删除 ${removed.toLocaleString()} 字`)
+  } else if (version.kind === 'user-edited' && parent && parent.kind !== 'cleaned') {
+    parts.push('人工编辑快照')
+  }
+  return parts.join(' · ')
 }
 
 // 只有"基于当前正文的同基线最新 cleaned 候选"才允许确认，与后端 confirmCleanedVersion 的三重校验对齐，
@@ -278,7 +300,11 @@ defineExpose({ loadSourceVersions })
       <div v-if="sourceVersionsLoading" class="source-version-empty">正在读取版本历史…</div>
       <div v-else-if="!sourceVersions.length" class="source-version-empty">尚无版本记录。完成首次分集或发起整理后会自动建立原文版本。</div>
       <article v-for="version in sourceVersions" :key="version.id" :class="['source-version-row', { current: sourceVersionCurrentId === version.id, candidate: version.kind === 'cleaned' }]">
-        <div><strong>{{ sourceVersionKindLabel(version.kind) }}</strong><small>V{{ version.id }} · {{ Number(version.content?.length || 0).toLocaleString() }} 字</small></div>
+        <div>
+          <strong>{{ sourceVersionKindLabel(version.kind) }}</strong>
+          <small>V{{ version.id }} · {{ Number(version.content?.length || 0).toLocaleString() }} 字</small>
+          <div v-if="sourceVersionExtra(version)" class="source-version-meta">{{ sourceVersionExtra(version) }}</div>
+        </div>
         <span v-if="sourceVersionCurrentId === version.id" class="source-current-badge">当前生效</span>
         <span v-else-if="version.kind === 'cleaned'" class="source-candidate-badge">待确认候选</span>
         <div class="source-version-actions">
@@ -330,6 +356,7 @@ defineExpose({ loadSourceVersions })
 .source-version-row.candidate { background: color-mix(in srgb, var(--warning) 5%, var(--surface-raised)); }
 .source-version-row strong { display: block; color: var(--text-1); font-size: 11px; }
 .source-version-row small { display: block; margin-top: 2px; color: var(--text-3); font-family: var(--font-mono); font-size: 9px; }
+.source-version-meta { display: block; margin-top: 3px; color: var(--text-3); font-size: 9.5px; line-height: 1.5; }
 .source-version-actions { display: flex; align-items: center; gap: 8px; }
 .source-current-badge, .source-candidate-badge { padding: 3px 7px; border-radius: 99px; font-size: 9px; font-weight: 700; }
 .source-current-badge { background: var(--success-bg); color: var(--success); }
