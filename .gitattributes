@@ -1,3 +1,10 @@
 # Issue #80 / S1 baseline 样本与 ground-truth：字节级固定（UTF-8 无 BOM、LF），
 # 禁止 git 行尾自动转换（core.autocrlf / eol 均不生效），保证 fileSha256/contentHash 稳定可复核。
 backend/tests/fixtures/source-baseline/** -text
+
+# Issue #96 / 生产包 v0.1 验收样本：字节级固定（UTF-8 无 BOM、LF）
+# 契约 §3.2 的 file_hash 对行尾不敏感（解析器先归一化），但 fixture 的静态真值
+# 必须跨机器逐字节可复核，否则 manifest 内的指纹无法被第三方复算。
+# 该规则只覆盖 packages/，脚本与文档仍按仓库默认行尾处理。
+backend/tests/fixtures/production-package/packages/** -text
+backend/tests/fixtures/production-package/packages/** text eol=lf
