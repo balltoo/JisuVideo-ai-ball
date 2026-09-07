@@ -78,6 +78,10 @@
 | HB-20260907-01 | Issue #75 S2 原文整理兼容链路验收——clean/confirm/health/analyze 逐字质量门 + gpt 系模型能力边界对照（含 lease bug 修复） | 兼容链路验收已执行（2026-09-07）：drama13（1665 字含噪）S2 全链通过、drama9（31045 字）三 gpt 模型 12k 块逐字失配 / astra hang、S3 中断契约通过；修复 clean worker 租约误杀 bug。该证据不再等同长文主流程验收，长文主线改走生产包导入与项目圣经 | [查看验收报告](../2026-09-07-issue75-s2-acceptance-report.md) |
 | HB-20260907-02 | 长文主流程收口——外部处理、短剧生产包导入与项目圣经统筹 | 已完成方向与实施规格；不再将平台内去噪作为长文必经路径，下一步单列生产包导入最小契约 | [查看实施方案](../long-form-production-package-plan.md) |
 | HB-20260907-03 | 近期迭代与长文主路线复盘订正 | #86–#92 保留为版本管理/兼容整理能力；#75 不再作为平台内长文主流程验收；路线图改为先做生产包导入与项目圣经，随后才做上下文和全局资产接线 | [查看生产包方案](../long-form-production-package-plan.md) |
+| HB-20260907-04 | Issue #95 阶段 1：生产包导入 Markdown v0.1 最小契约与解析预览边界 | 已完成契约、最小两集模板/示例和 T01–T12 测试矩阵；本批只冻结字段、指纹、只读解析、确认写入、幂等/冲突和错误语义，不改 schema/API/项目大页 | [查看导入契约](../production-package-import-v0.1.md) |
+| HB-20260907-05 | Issue #95 PR #97 评审反馈收口 | 已补齐可复算 fingerprint 脚本、manifest-inclusive validation snapshot、强幂等持久化边界和原始/规范化/写入正文的字节语义；待 PR #97 复审 | [查看导入契约](../production-package-import-v0.1.md) |
+| HB-20260907-06 | Issue #95 PR #97 第二轮评审反馈收口 | 已将幂等记录、业务数据和 succeeded 结果冻结为同一事务；补充 source canonical 拼接精确规则、可复算 hash 向量及旧 trim helper 兼容边界；待 PR #97 再次复审 | [查看导入契约](../production-package-import-v0.1.md) |
+| HB-20260907-07 | Issue #95 PR #97 第三轮评审反馈收口 | 已固定 validation fingerprint 参与确认身份及校验顺序；补充 T08b/T08c；明确 `sha256:` 展示值与数据库 64 位 hex 存储值的转换，并让金样例脚本校验三组摘要；待 PR #97 最后一轮复审 | [查看导入契约](../production-package-import-v0.1.md) |
 
 ## 记录规范
 
