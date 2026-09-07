@@ -15,7 +15,7 @@
  */
 import { createHash } from 'node:crypto'
 import type { Pool } from 'mysql2/promise'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { pool, db, schema, getInsertId } from '../db/index.js'
 
 /** source_versions.base_kind 取值（契约 §6.1：source / cleaned / confirmed / user-edited） */
@@ -56,6 +56,7 @@ const now = () => new Date().toISOString()
  * @param expectedContent 请求正文，仅用于锁内比对，绝不作为 source 的内容来源。
  */
 export class SourceContentConflict extends Error {}
+export class SourceVersionPointerError extends Error {}
 
 export async function ensureSourceVersion(
   dramaId: number,
@@ -68,18 +69,13 @@ export async function ensureSourceVersion(
     try {
       // 锁 dramas 行（契约 §6.3 懒生成原子原语）
       const [rows] = await connection.query<any[]>(
-        'SELECT id, description, deleted_at FROM dramas WHERE id = ? FOR UPDATE',
+        'SELECT id, description, current_source_version_id, deleted_at FROM dramas WHERE id = ? FOR UPDATE',
         [dramaId],
       )
       const drama = rows[0]
       if (!drama || drama.deleted_at) {
         await connection.commit()
         return null
-      }
-
-      const content = String(drama.description ?? '').trim()
-      if (expectedContent !== undefined && expectedContent.trim() !== content) {
-        throw new SourceContentConflict('全文内容已变化，请先保存并刷新后重新分析')
       }
 
       // 锁内判定：已有任意版本行即返回既有 id，与本次 content 是否有效无关
@@ -89,8 +85,25 @@ export async function ensureSourceVersion(
         [dramaId],
       )
       if (versions.length) {
+        let currentContent = String(drama.description ?? '').trim()
+        if (drama.current_source_version_id != null) {
+          const [currentRows] = await connection.query<any[]>(
+            'SELECT content FROM source_versions WHERE id = ? AND drama_id = ?',
+            [drama.current_source_version_id, dramaId],
+          )
+          if (!currentRows[0]) throw new SourceVersionPointerError('当前正文版本不存在或不属于当前项目')
+          currentContent = String(currentRows[0].content ?? '').trim()
+        }
+        if (expectedContent !== undefined && expectedContent.trim() !== currentContent) {
+          throw new SourceContentConflict('全文内容已变化，请先保存并刷新后重新分析')
+        }
         await connection.commit()
         return Number(versions[0].id)
+      }
+
+      const content = String(drama.description ?? '').trim()
+      if (expectedContent !== undefined && expectedContent.trim() !== content) {
+        throw new SourceContentConflict('全文内容已变化，请先保存并刷新后重新分析')
       }
 
       // 首版只使用锁内持久化正文；空正文不创建版本。
@@ -134,6 +147,10 @@ export async function getCurrentSourceText(dramaId: number): Promise<string> {
   const [version] = await db
     .select()
     .from(schema.sourceVersions)
-    .where(eq(schema.sourceVersions.id, Number(drama.currentSourceVersionId)))
-  return version ? String(version.content || '') : String(drama.description || '').trim()
+    .where(and(
+      eq(schema.sourceVersions.id, Number(drama.currentSourceVersionId)),
+      eq(schema.sourceVersions.dramaId, dramaId),
+    ))
+  if (!version) throw new SourceVersionPointerError('当前正文版本不存在或不属于当前项目')
+  return String(version.content || '').trim()
 }
