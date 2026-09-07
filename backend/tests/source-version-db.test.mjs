@@ -194,14 +194,16 @@ test('懒生成：事务内锁 dramas 行 + 锁内判定已有版本行则跳过
   assert.match(src.slice(start), /\} catch \(err\)[\s\S]*?await connection\.rollback\(\)/)
 })
 
-test('懒生成：analyze-episodes 与 #72 原文整理入口均可接线，但版本操作仍未越界', () => {
+test('#79 第一批版本操作：允许查看、确认与跳过；切换当前版本仍留给第二批', () => {
   const routes = read('src/routes/dramas.ts')
   assert.match(routes, /import \{ ensureSourceVersion,[\s\S]*?SourceContentConflict \} from '\.\.\/services\/source-versions\.js'/)
   assert.match(routes, /await ensureSourceVersion\(id, content\)/)
-  // #72 新增健康检查/清理入口；versions/confirm/switch 仍归后续任务。
-  assert.doesNotMatch(routes, /source\/versions/, '不得新增 GET /source/versions（归 #72）')
-  assert.doesNotMatch(routes, /source\/confirm/, '不得新增 /source/confirm（归 #72）')
-  assert.doesNotMatch(routes, /source\/switch/, '不得新增 /source/switch（归 #72）')
+  // #79 第一批新增只读历史、确认 cleaned、跳过清理；current/switch 仍归第二批。
+  assert.match(routes, /source\/versions/, '必须提供 GET /source/versions')
+  assert.match(routes, /source\/confirm/, '必须提供 POST /source/confirm')
+  assert.match(routes, /source\/skip/, '必须提供 POST /source/skip')
+  assert.doesNotMatch(routes, /source\/current/, '不得提前新增 /source/current（归 #79 第二批）')
+  assert.doesNotMatch(routes, /source\/switch/, '不得提前新增 /source/switch（归 #79 第二批）')
 })
 
 // ─── 5. 旧项目零回填（契约 §6.3）─────────────────────────────────────────
