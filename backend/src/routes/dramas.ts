@@ -8,7 +8,7 @@ import { getActiveConfigId } from '../services/ai.js'
 import { importNovelSource } from '../services/source-import.js'
 import { defaultEpisodeCount, splitSourceIntoEpisodes } from '../services/episode-planning.js'
 import { contentFingerprint, normalizeReviewablePlan, parseJsonArray, serializePlanDraft, sourceHash } from '../services/episode-plan-draft.js'
-import { ensureSourceVersion, getCurrentSourceText, SourceContentConflict } from '../services/source-versions.js'
+import { ensureSourceVersion, getCurrentSourceText, SourceContentConflict, SourceVersionPointerError } from '../services/source-versions.js'
 import {
   estimateSourceCleanup,
   inspectSourceHealth,
@@ -16,7 +16,14 @@ import {
   queueSourceCleanupTask,
   startSourceCleanup,
 } from '../services/source-cleanup.js'
-import { confirmCleanedVersion, listSourceVersions, skipSourceCleanup, SourceVersionOperationError } from '../services/source-version-operations.js'
+import {
+  confirmCleanedVersion,
+  listSourceVersions,
+  skipSourceCleanup,
+  switchCurrentSourceVersion,
+  updateCurrentSourceText,
+  SourceVersionOperationError,
+} from '../services/source-version-operations.js'
 import { acquireAiRequest } from '../services/request-guard.js'
 import { parseJsonObject } from '../utils/json.js'
 import { sampleSourceContent } from '../utils/source-sample.js'
@@ -510,13 +517,46 @@ app.post('/:id/source/skip', async (c) => {
   }
 })
 
+// PUT /dramas/:id/source/current — 编辑确认稿时派生 user-edited 新版本，历史行不可变。
+app.put('/:id/source/current', async (c) => {
+  const id = Number(c.req.param('id'))
+  let body: any = {}
+  try { body = await c.req.json() } catch { return badRequest(c, '请求体必须包含 expected_current_version_id 与 content') }
+  try { return success(c, await updateCurrentSourceText(id, body.expected_current_version_id, body.content, body.note)) } catch (error: any) {
+    if (error instanceof SourceVersionOperationError) {
+      if (error.status === 404) return notFound(c, error.message)
+      if (error.status === 409) return conflict(c, error.message)
+    }
+    return badRequest(c, error?.message || '保存正文版本失败')
+  }
+})
+
+// POST /dramas/:id/source/switch — 只移动当前指针；cleaned 候选不能直接生效。
+app.post('/:id/source/switch', async (c) => {
+  const id = Number(c.req.param('id'))
+  let body: any = {}
+  try { body = await c.req.json() } catch { return badRequest(c, '请求体必须包含 target_version_id 与 expected_current_version_id') }
+  try { return success(c, await switchCurrentSourceVersion(id, body.target_version_id, body.expected_current_version_id)) } catch (error: any) {
+    if (error instanceof SourceVersionOperationError) {
+      if (error.status === 404) return notFound(c, error.message)
+      if (error.status ===409) return conflict(c, error.message)
+    }
+    return badRequest(c, error?.message || '切换正文版本失败')
+  }
+})
+
 // POST /dramas/:id/analyze-episodes - AI 推荐集数与标题/摘要，正文由后端按原文顺序无改写拆分
 app.post('/:id/analyze-episodes', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
   const [drama] = await db.select().from(schema.dramas).where(eq(schema.dramas.id, id))
   if (!drama || drama.deletedAt) return notFound(c, '项目不存在')
-  const content = String(body.content ?? drama.description ?? '').trim()
+  let currentContent = ''
+  try { currentContent = await getCurrentSourceText(id) } catch (error) {
+    if (error instanceof SourceVersionPointerError) return badRequest(c, error.message)
+    throw error
+  }
+  const content = String(body.content ?? currentContent).trim()
   if (content.length < 20) return badRequest(c, '全文内容太短，请至少输入 20 个字')
   if (content.length > 200_000) return badRequest(c, '全文内容超过 20 万字，请先精简后再分析')
   const requestedRaw = body.episode_count
@@ -546,7 +586,7 @@ app.post('/:id/analyze-episodes', async (c) => {
 
   const requirement = String(body.requirement ?? '').trim()
   if (requirement.length > 500) return badRequest(c, '创作要求最多 500 字，请精简后重试')
-  if (content !== String(drama.description || '').trim()) {
+  if (content !== currentContent) {
     return conflict(c, '全文内容已变化，请先保存并刷新后重新分析')
   }
   const requirementContext = requirement
@@ -655,7 +695,19 @@ app.post('/:id/episodes/from-plan', async (c) => {
       await connection.rollback()
       return conflict(c, 'VERSION_CONFLICT：服务器草稿已有更新，请重新加载后继续')
     }
-    if (String(draft.source_hash) !== sourceHash(drama.description)) {
+    let effectiveSourceText = String(drama.description || '').trim()
+    if (drama.current_source_version_id != null) {
+      const [versionRows] = await connection.query<any[]>(
+        'SELECT content FROM source_versions WHERE id = ? AND drama_id = ? FOR UPDATE',
+        [drama.current_source_version_id, id],
+      )
+      if (!versionRows[0]) {
+        await connection.rollback()
+        return badRequest(c, '当前正文版本不存在或不属于当前项目，请先修复版本状态')
+      }
+      effectiveSourceText = String(versionRows[0].content || '').trim()
+    }
+    if (String(draft.source_hash) !== sourceHash(effectiveSourceText)) {
       await connection.rollback()
       return conflict(c, '全文已变化，请重新生成分集建议后再提交')
     }

@@ -173,7 +173,7 @@ test('I7：懒生成代码无任何版本行 UPDATE / DELETE 路径', () => {
 test('懒生成：事务内锁 dramas 行 + 锁内判定已有版本行则跳过', () => {
   const src = read('src/services/source-versions.ts')
   assert.match(src, /await connection\.beginTransaction\(\)/)
-  assert.match(src, /SELECT id, description, deleted_at FROM dramas WHERE id = \? FOR UPDATE/)
+  assert.match(src, /SELECT id, description, current_source_version_id, deleted_at FROM dramas WHERE id = \? FOR UPDATE/)
   assert.match(src, /SELECT id FROM source_versions WHERE drama_id = \? ORDER BY id ASC LIMIT 1/)
   assert.match(src, /await connection\.commit\(\)/)
   assert.match(src, /await connection\.rollback\(\)/)
@@ -194,16 +194,29 @@ test('懒生成：事务内锁 dramas 行 + 锁内判定已有版本行则跳过
   assert.match(src.slice(start), /\} catch \(err\)[\s\S]*?await connection\.rollback\(\)/)
 })
 
-test('#79 第一批版本操作：允许查看、确认与跳过；切换当前版本仍留给第二批', () => {
+test('#79 版本操作：确认/编辑创建新行，切换只移动指针，分集始终读取当前有效正文', () => {
   const routes = read('src/routes/dramas.ts')
-  assert.match(routes, /import \{ ensureSourceVersion,[\s\S]*?SourceContentConflict \} from '\.\.\/services\/source-versions\.js'/)
+  const operations = read('src/services/source-version-operations.ts')
+  const sourceVersions = read('src/services/source-versions.ts')
+  assert.match(routes, /import \{ ensureSourceVersion,[\s\S]*?SourceContentConflict[\s\S]*?\} from '\.\.\/services\/source-versions\.js'/)
   assert.match(routes, /await ensureSourceVersion\(id, content\)/)
-  // #79 第一批新增只读历史、确认 cleaned、跳过清理；current/switch 仍归第二批。
+  // #79 第一批：只读历史、确认 cleaned、跳过清理。
   assert.match(routes, /source\/versions/, '必须提供 GET /source/versions')
   assert.match(routes, /source\/confirm/, '必须提供 POST /source/confirm')
   assert.match(routes, /source\/skip/, '必须提供 POST /source/skip')
-  assert.doesNotMatch(routes, /source\/current/, '不得提前新增 /source/current（归 #79 第二批）')
-  assert.doesNotMatch(routes, /source\/switch/, '不得提前新增 /source/switch（归 #79 第二批）')
+  // #79 第二批：编辑新建 user-edited，switch 仅切 pointer，cleaned 永不生效。
+  assert.match(routes, /app\.put\('\/:id\/source\/current'/)
+  assert.match(routes, /app\.post\('\/:id\/source\/switch'/)
+  assert.match(operations, /INSERT INTO source_versions[\s\S]*?'user-edited'/)
+  assert.match(operations, /UPDATE dramas SET current_source_version_id = \?, source_skip_at = NULL/)
+  assert.match(operations, /\['source', 'confirmed', 'user-edited'\]\.includes\(target\.base_kind\)/)
+  assert.doesNotMatch(operations, /UPDATE\s+source_versions/i, 'I7：版本行不可原地更新')
+  assert.doesNotMatch(operations, /DELETE\s+FROM\s+source_versions/i, 'I7：版本行不可删除')
+  // 指针的归属检查必须带 drama_id；失效/跨项目指针不得回退读取其他项目正文。
+  assert.match(sourceVersions, /WHERE id = \? AND drama_id = \?/)
+  assert.match(sourceVersions, /throw new SourceVersionPointerError/)
+  assert.match(routes, /effectiveSourceText/)
+  assert.match(routes, /sourceHash\(effectiveSourceText\)/)
 })
 
 // ─── 5. 旧项目零回填（契约 §6.3）─────────────────────────────────────────
@@ -385,7 +398,38 @@ test('真实 MySQL：initMySqlSchema 连续 2 次幂等 + 并发 5 次懒生成�
     const [versionsAfter] = await pool.query('SELECT COUNT(*) AS count FROM source_versions WHERE drama_id = ?', [dramaId])
     assert.equal(Number(versionsAfter[0].count), 1, '重复调用不得新增版本行')
 
-    // 6.7 已有版本行的项目不会因 contentOverride 变化而新建（I7 不可变语义）
+    // 6.7 #79：确认 cleaned / 编辑 / 切换均保持版本行不可变。
+    const operations = await import('../src/services/source-version-operations.ts')
+    const cleanText = '第一章 午夜面馆\n老板娘掀开布帘的时候，外面已经落雪。'
+    const cleanHash = mod.sourceVersionContentHash(cleanText)
+    const [cleanInsert] = await pool.execute(
+      `INSERT INTO source_versions (drama_id, base_kind, content, content_hash, base_hash, parent_version_id, diff, stats, created_at, updated_at)
+       VALUES (?, 'cleaned', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [dramaId, cleanText, cleanHash, row.content_hash, row.id, JSON.stringify({ removals: [] }), JSON.stringify({}), ts, ts],
+    )
+    const cleanedId = Number(cleanInsert.insertId)
+    const confirmed = await operations.confirmCleanedVersion(dramaId, cleanedId, Number(row.id), pool)
+    assert.equal(confirmed.kind, 'confirmed')
+    assert.equal(confirmed.parent_version_id, cleanedId, 'confirm 必须以 cleaned 为 parent 创建新行')
+    const [cleanedAfterConfirm] = await pool.query('SELECT base_kind, content FROM source_versions WHERE id = ?', [cleanedId])
+    assert.equal(cleanedAfterConfirm[0].base_kind, 'cleaned', 'confirm 不得原地迁移 cleaned')
+    assert.equal(cleanedAfterConfirm[0].content, cleanText)
+
+    const edited = await operations.updateCurrentSourceText(dramaId, confirmed.id, `${cleanText}\n雨停之前，她没有关门。`, '补充结尾', pool)
+    assert.equal(edited.kind, 'user-edited')
+    assert.equal(edited.parent_version_id, confirmed.id, '编辑必须派生 user-edited 行')
+    const [countBeforeSwitch] = await pool.query('SELECT COUNT(*) AS count FROM source_versions WHERE drama_id = ?', [dramaId])
+    const switched = await operations.switchCurrentSourceVersion(dramaId, Number(row.id), edited.id, pool)
+    assert.deepEqual(switched.current, { id: Number(row.id), kind: 'source' })
+    const [countAfterSwitch] = await pool.query('SELECT COUNT(*) AS count FROM source_versions WHERE drama_id = ?', [dramaId])
+    assert.equal(Number(countAfterSwitch[0].count), Number(countBeforeSwitch[0].count), 'switch 只能移动指针，不得创建版本行')
+    await assert.rejects(
+      operations.switchCurrentSourceVersion(dramaId, cleanedId, Number(row.id), pool),
+      (error) => error?.status === 400,
+      'cleaned 未确认不得成为当前正文',
+    )
+
+    // 6.8 已有版本行的项目不会因 contentOverride 变化而新建（I7 不可变语义）
     const overrideText = '重写后的正文，用于验证 contentOverride 不会改写既有版本行。'
     assert.equal(mod.sourceVersionContentHash(overrideText), createHash('sha256').update(overrideText).digest('hex'))
     await assert.rejects(mod.ensureSourceVersion(dramaId, overrideText, pool), mod.SourceContentConflict)
