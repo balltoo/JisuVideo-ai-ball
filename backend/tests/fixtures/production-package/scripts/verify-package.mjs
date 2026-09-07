@@ -11,9 +11,16 @@
  * 输出契约 §3.2 要求的三类指纹与逐文件 hash/字节数。
  */
 import * as h from '../helpers.mjs'
+import path from 'node:path'
 
 const POSITIVE_ID = 'fixture-rain-lantern'
-const CONTRACT_EXAMPLE = 'docs/examples/production-package-v0.1'
+
+// 必须基于脚本自身位置解析仓库根，不能依赖 cwd。
+// FIXTURE_ROOT = <repo>/backend/tests/fixtures/production-package，往上 4 级到仓库根。
+// 用相对 cwd 的路径写 `docs/examples/...` 会在 `cd backend && node ... --all` 时
+// 解析成 <repo>/backend/docs/examples/...，该目录不存在。
+const REPO_ROOT = path.resolve(h.FIXTURE_ROOT, '..', '..', '..', '..')
+const CONTRACT_EXAMPLE = path.join(REPO_ROOT, 'docs', 'examples', 'production-package-v0.1')
 
 const args = new Set(process.argv.slice(2))
 const doCheck = args.has('--check')

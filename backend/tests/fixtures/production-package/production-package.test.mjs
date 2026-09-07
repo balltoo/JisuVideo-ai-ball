@@ -20,6 +20,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 import * as h from './helpers.mjs'
 import { MANIFEST_VERSION, CONTRACT_VERSION, CODE, EXPECTED, NEGATIVES, POSITIVE_ID } from './manifest.mjs'
@@ -96,6 +97,75 @@ test('T01b 行尾归一化对 file_hash 与指纹幂等（CRLF→LF）', () => {
   for (const want of g.files) {
     const actual = p.rows.find((r) => r.path === want.path)
     assert.equal(actual.fileHash, want.fileHash, `${want.path} file_hash 不因行尾变化`)
+  }
+})
+
+// ─────────────── T01c 末尾换行规范化（P1 回归）───────────────
+// 契约 §3.2：去掉**所有**末尾 LF 后追加**恰好一个** LF。
+// 三种输入末尾形态必须收敛到同一结果，且 file_hash 必须确定（不得依赖未初始化内存）。
+test('T01c 无末尾 LF 时追加的 LF 必须是确定的 0x0a', () => {
+  const cases = [
+    { input: 'abc', expect: '6162630a', label: '无末尾 LF' },
+    { input: 'abc\n', expect: '6162630a', label: '单个末尾 LF' },
+    { input: 'abc\n\n', expect: '6162630a', label: '多个末尾 LF' },
+    { input: 'abc\r\n\n', expect: '6162630a', label: 'CRLF' },
+    { input: 'abc\r\n\n\n', expect: '6162630a', label: 'CRLF+LF' },
+  ]
+  for (const c of cases) {
+    const out = h.normalizeFileBytes(Buffer.from(c.input))
+    assert.equal(out.toString('hex'), c.expect, `${c.label} 末尾形态必须一致`)
+    assert.equal(out.length, 4, `${c.label} 长度固定`)
+  }
+})
+
+test('T01c 空文件规范化为恰好一个 LF', () => {
+  const out = h.normalizeFileBytes(Buffer.alloc(0))
+  assert.equal(out.toString('hex'), '0a', '空文件 → 单字节 0x0a')
+  assert.equal(out.length, 1)
+})
+
+test('T01c 返回值必须是独立内存，不共享底层 buffer', () => {
+  const raw = Buffer.from('abc\n')
+  const out = h.normalizeFileBytes(raw)
+  // 二次写入返回值不得影响原始输入
+  out[0] = 0x5a
+  assert.equal(raw.toString(), 'abc\n', '原始 buffer 未被改动')
+  // 连续两次调用必须得到相同结果（确定性）
+  const a = h.normalizeFileBytes(Buffer.from('abc')).toString('hex')
+  const b = h.normalizeFileBytes(Buffer.from('abc')).toString('hex')
+  assert.equal(a, b, '同输入必须产生相同输出')
+})
+
+test('T01c 正例所有文件的最后一个字节必须是 0x0a', () => {
+  // 这条守住正例样本本身符合 §3.2 末尾形态，防止样本被手工编辑后静默漂移。
+  const p = h.readPackage(POSITIVE_ROOT)
+  for (const rel of p.rows.map((r) => r.path)) {
+    const normalized = p.files.get(rel)
+    assert.equal(normalized[normalized.length - 1], 0x0a, `${rel} 末尾必须是 LF`)
+    // 注意：规范化是「剥掉所有末尾 LF 再补一个」，不是无条件追加，所以对
+    // 末尾恰一个 LF 的文件长度不变（831 → 831）；断言 `+1` 是错的。
+    // 因此这里直接字节级比对 §3.2 规范内容：CRLF->LF（latin1 无损处理 UTF-8
+    // 多字节字符）、剥末尾 LF、补一个 0x0a。
+    //
+    // 诚实说明：这条字节断言对**正例样本**抓不到 P1（无末尾 LF 时 allocUnsafe
+    // 未初始化），因为 6 个 fixture 文件末尾都恰好一个 LF，buggy 实现剥掉后再补
+    // 一个，结果与正确实现逐字节相同。真正守住 P1 的是上面两条合成输入断言
+    // （`abc` / 空文件）。这条的作用是另一件事：守住样本本身的 §3.2 末尾形态，
+    // 防止样本被手工编辑后静默漂移。
+    const disk = fs.readFileSync(path.join(POSITIVE_ROOT, rel))
+    const expect = Buffer.from(
+      Buffer.from(disk, 'latin1')
+        .toString('latin1')
+        .replace(/\r\n/g, '\n')
+        .replace(/\n+$/, '')
+        + '\n',
+      'latin1',
+    )
+    assert.equal(
+      normalized.toString('hex'),
+      expect.toString('hex'),
+      `${rel} 规范化内容必须与 §3.2 逐字节一致`,
+    )
   }
 })
 
@@ -410,3 +480,16 @@ function stripLiterals(src) {
     .replace(/"(?:\\.|[^"\\\n])*"/g, '')      // 双引号串
     .replace(/\/(?:\\.|[^/\n])*(?:\/[gimsuy]*)?/g, '') // 正则字面量
 }
+// T99 --all smoke test：契约示例包路径必须基于脚本自身位置解析，不能依赖 cwd。
+// Issue #98 review P2-1：`cd backend && node ... --all` 会把相对 cwd 的
+// `docs/examples/...` 解析成 <repo>/backend/docs/examples/...，该目录不存在。
+test('T99 verify-package.mjs --all 可复算契约示例包（路径解析 smoke test）', () => {
+  const script = path.join(h.FIXTURE_ROOT, 'scripts', 'verify-package.mjs')
+  const stdout = execFileSync('node', [script, '--all'], {
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+  })
+  assert.match(stdout, /package_fingerprint:/)
+  assert.match(stdout, /#96 fixture 正例/)
+  assert.match(stdout, /契约示例包/)
+})

@@ -55,8 +55,12 @@ export function normalizeFileBytes(raw) {
   let end = folded.length
   while (end > 0 && folded[end - 1] === 0x0a) end -= 1
   // 必须返回独立副本：subarray 只是 view，共享 folded 的底层内存，哈希会被污染。
-  const out = Buffer.allocUnsafe(end + 1)
-  folded.copy(out, 0, 0, end + 1)
+  // 追加的 LF 必须显式写入 0x0a：原文件没有末尾 LF 时 end === folded.length，
+  // 若用 allocUnsafe 再 copy(end+1)，最后 1 字节保持未初始化，file_hash 会变成
+  // 非确定值（契约 §3.2 要求输入 `abc` 得到 `abc\n`，空文件得到 `\n`）。
+  const out = Buffer.alloc(end + 1)
+  folded.copy(out, 0, 0, end)
+  out[end] = 0x0a
   return out
 }
 
