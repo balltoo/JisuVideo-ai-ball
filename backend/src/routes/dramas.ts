@@ -16,6 +16,7 @@ import {
   queueSourceCleanupTask,
   startSourceCleanup,
 } from '../services/source-cleanup.js'
+import { confirmCleanedVersion, listSourceVersions, skipSourceCleanup, SourceVersionOperationError } from '../services/source-version-operations.js'
 import { acquireAiRequest } from '../services/request-guard.js'
 import { parseJsonObject } from '../utils/json.js'
 import { sampleSourceContent } from '../utils/source-sample.js'
@@ -473,6 +474,39 @@ app.post('/:id/source/clean', async (c) => {
   } catch (error: any) {
     if (error?.message === '项目不存在') return notFound(c, error.message)
     return badRequest(c, error?.message || '原文整理任务创建失败')
+  }
+})
+
+// GET /dramas/:id/source/versions — 版本历史只读视图；cleaned 不会作为 current 返回。
+app.get('/:id/source/versions', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  try { return success(c, await listSourceVersions(id)) } catch (error: any) {
+    return error instanceof SourceVersionOperationError && error.status === 404 ? notFound(c, error.message) : badRequest(c, error?.message || '读取版本历史失败')
+  }
+})
+
+// POST /dramas/:id/source/confirm — cleaned -> 新 confirmed 行 + 当前指针，版本行永不原地迁移。
+app.post('/:id/source/confirm', async (c) => {
+  const id = Number(c.req.param('id'))
+  let body: any = {}
+  try { body = await c.req.json() } catch { return badRequest(c, '请求体必须包含 target_version_id 与 expected_current_version_id') }
+  try { return success(c, await confirmCleanedVersion(id, body.target_version_id, body.expected_current_version_id)) } catch (error: any) {
+    if (error instanceof SourceVersionOperationError) {
+      if (error.status === 404) return notFound(c, error.message)
+      if (error.status === 409) return conflict(c, error.message)
+    }
+    return badRequest(c, error?.message || '确认整理稿失败')
+  }
+})
+
+// POST /dramas/:id/source/skip — 仅原文 source 当前态可跳过，候选 cleaned 历史不删除。
+app.post('/:id/source/skip', async (c) => {
+  const id = Number(c.req.param('id'))
+  let body: any = {}
+  try { body = await c.req.json() } catch { /* note 可省略 */ }
+  try { return success(c, await skipSourceCleanup(id, body.note)) } catch (error: any) {
+    return error instanceof SourceVersionOperationError && error.status === 404 ? notFound(c, error.message) : badRequest(c, error?.message || '跳过整理失败')
   }
 })
 
