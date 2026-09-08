@@ -1,6 +1,7 @@
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import yazl from 'yazl'
@@ -12,6 +13,7 @@ import {
   createProductionPackagePreview,
   getProductionPackagePreview,
   cleanupExpiredProductionPackagePreviews,
+  restoreProductionPackagePreviews,
   clearProductionPackagePreviews,
 } from '../src/services/production-package-preview.ts'
 import productionPackages from '../src/routes/productionPackages.ts'
@@ -93,6 +95,22 @@ test('过期清理会删除快照并阻止继续读取', async () => {
   const preview = await createProductionPackagePreview({ zip: await zipEntries(fixtureEntries()), owner: 'u' })
   assert.equal(cleanupExpiredProductionPackagePreviews(Date.now() + PREVIEW_LIMITS.ttlMs + 1), 1)
   assert.throws(() => getProductionPackagePreview(preview.preview_token, 'u'), (error) => error.code === 'PACKAGE_PREVIEW_NOT_FOUND')
+})
+
+test('快照元数据持久化原始 ZIP，启动扫描可恢复未过期 token', async () => {
+  const zip = await zipEntries(fixtureEntries())
+  const preview = await createProductionPackagePreview({ zip, owner: 'u' })
+  const root = path.join(os.tmpdir(), 'jisu-production-package-previews')
+  const directories = fs.readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory())
+  assert.equal(directories.length, 1)
+  const directory = path.join(root, directories[0].name)
+  const metadata = JSON.parse(fs.readFileSync(path.join(directory, 'snapshot.json'), 'utf8'))
+  assert.equal(metadata.uploadRelative, 'upload.zip')
+  assert.equal(typeof metadata.createdAt, 'number')
+  assert.equal(metadata.expiresAt > metadata.createdAt, true)
+  assert.deepEqual(fs.readFileSync(path.join(directory, metadata.uploadRelative)), zip)
+  assert.equal(restoreProductionPackagePreviews(), 1)
+  assert.deepEqual(getProductionPackagePreview(preview.preview_token, 'u'), preview)
 })
 
 test('parser blocked 结果保留诊断但仍使用传输层快照 token', async () => {
