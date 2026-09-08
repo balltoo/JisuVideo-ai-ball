@@ -22,9 +22,11 @@ import merge from './routes/merge.js'
 import skills from './routes/skills.js'
 import props from './routes/props.js'
 import assets from './routes/assets.js'
+import productionPackages from './routes/productionPackages.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { recoverInterruptedTasks } from './services/recovery.js'
 import { startStorageCleanup } from './utils/cleanup.js'
+import { startProductionPackagePreviewCleanup } from './services/production-package-preview.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -68,6 +70,7 @@ api.route('/merge', merge)
 api.route('/skills', skills)
 api.route('/props', props)
 api.route('/assets', assets)
+api.route('/production-packages', productionPackages)
 
 app.route('/api/v1', api)
 
@@ -102,5 +105,6 @@ recoveryTimer.unref()
 
 // 存储清理定时任务：temp TTL + 孤儿文件 GC（间隔/保留时长见 utils/cleanup.ts 环境变量）
 startStorageCleanup()
+startProductionPackagePreviewCleanup()
 
 serve({ fetch: app.fetch, port })

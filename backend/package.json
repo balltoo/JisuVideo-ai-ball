@@ -35,6 +35,7 @@
     "pino": "^10.3.1",
     "sharp": "^0.34.5",
     "uuid": "^13.0.0",
+    "yauzl": "^3.4.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -42,9 +43,12 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.5.0",
     "@types/uuid": "^10.0.0",
+    "@types/yauzl": "^2.10.3",
+    "@types/yazl": "^3.3.1",
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "yazl": "^3.3.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
