@@ -1,6 +1,6 @@
 # 短剧生产包 ZIP 传输与预览快照契约 v0.1
 
-> 状态：提案，供 Issue #101 评审
+> 状态：阶段 1 ZIP 传输子契约 / 已冻结实施基线
 > 关联语义契约：[`production-package-import-v0.1.md`](production-package-import-v0.1.md)
 > 适用阶段：ZIP 上传 → 安全解压 → 只读解析 → 预览
 >
