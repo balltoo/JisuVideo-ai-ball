@@ -201,11 +201,11 @@ source_version_canonical_hash_hex: 1d2f0bc17032163649f4aa3d78ed890dc34dbe3f25ea9
 
 Confirm 固定按以下顺序处理：
 
-1. 先验证 `preview_token`、当前包的全部 `file_hash`、`package_fingerprint` 和 `validation_fingerprint`；任一不一致立即返回 `PACKAGE_HASH_MISMATCH`，不进入幂等查询或结果重放。
+1. 先验证 `preview_token`、当前包的全部 `file_hash`、`package_fingerprint` 和 `validation_fingerprint`；任一快照内容不一致立即返回 `PACKAGE_SNAPSHOT_MISMATCH`，不进入幂等查询或结果重放。
 2. 快照验证通过后，再按 5.2 比较 `confirm_idempotency_key + package_fingerprint + validation_fingerprint + target_mode`；同 key 绑定了不同身份时返回 `IDEMPOTENCY_KEY_REUSED`，不得静默返回旧成功结果。
 3. 只有身份匹配且需要首次写入时，才进入同一数据库事务。
 
-manifest 也在全部文件比对范围内，因此预览后任一文件（包括 `source-manifest.md`）变化都必须先返回 `PACKAGE_HASH_MISMATCH`。
+manifest 也在全部文件比对范围内，因此预览后任一文件（包括 `source-manifest.md`）变化都必须先返回 `PACKAGE_SNAPSHOT_MISMATCH`。`PACKAGE_HASH_MISMATCH` 仅用于 Parse 阶段发现 `source-manifest.md` 声明的 `package_fingerprint` 与当前包计算值不一致。
 
 ### 5.2 幂等键
 
@@ -268,7 +268,8 @@ manifest 也在全部文件比对范围内，因此预览后任一文件（包�
 | `PACKAGE_DUPLICATE_ID` | parse | error | 展示重复的 external ID 和路径 |
 | `PACKAGE_EPISODE_INVALID` | parse | error | 展示文件名、集号或状态错误 |
 | `PACKAGE_REFERENCE_UNKNOWN` | parse | error | 展示缺失的角色/场景 external ID |
-| `PACKAGE_HASH_MISMATCH` | parse/confirm | error | 提示包在预览后发生变化，要求重新解析 |
+| `PACKAGE_HASH_MISMATCH` | parse | error | `source-manifest.md` 声明的 `package_fingerprint` 与当前包计算值不一致；要求修正 manifest 或重新导出 |
+| `PACKAGE_SNAPSHOT_MISMATCH` | confirm | error | 提示预览快照与当前包发生变化，要求重新解析 |
 | `PACKAGE_TARGET_UNSUPPORTED` | parse/confirm | error | v0.1 只允许新建项目 |
 | `IDEMPOTENCY_KEY_REUSED` | confirm | error | 提示确认 key 已绑定另一组 package/validation fingerprint 或 target mode |
 | `PACKAGE_CONFLICT` | confirm | error | 展示冲突详情，要求用户重新确认 |
@@ -286,10 +287,10 @@ manifest 也在全部文件比对范围内，因此预览后任一文件（包�
 | T04 集号错误 | 将 `episodes/001.md` 改名为 `002.md` 或跳号 | `PACKAGE_EPISODE_INVALID` |
 | T05 重复实体 | 添加重复的 `C001` 或 `S001` 区块 | `PACKAGE_DUPLICATE_ID` |
 | T06 未知引用 | episode 引用不存在的角色/场景 ID | `PACKAGE_REFERENCE_UNKNOWN` |
-| T07a 内容变化 | 预览后修改任一非 manifest 文件再确认 | `PACKAGE_HASH_MISMATCH`，不写库 |
-| T07b manifest 变化 | 预览后只修改 `source-manifest.md`（例如 reviewer note）再确认 | `validation_fingerprint`/逐文件 hash 不一致，返回 `PACKAGE_HASH_MISMATCH`，不写库 |
+| T07a 内容变化 | 预览后修改任一非 manifest 文件再确认 | `PACKAGE_SNAPSHOT_MISMATCH`，不写库 |
+| T07b manifest 变化 | 预览后只修改 `source-manifest.md`（例如 reviewer note）再确认 | `validation_fingerprint`/逐文件 hash 不一致，返回 `PACKAGE_SNAPSHOT_MISMATCH`，不写库 |
 | T08 重复确认 | 相同 key、package fingerprint、validation fingerprint、target mode 确认两次 | 返回同一结果，不新增项目 |
-| T08b manifest 变化后重放 | 同 key、同 package fingerprint，预览后只修改 manifest 再确认 | 第 1 步先返回 `PACKAGE_HASH_MISMATCH`，不得重放旧成功结果 |
+| T08b manifest 变化后重放 | 同 key、同 package fingerprint，预览后只修改 manifest 再确认 | 第 1 步先返回 `PACKAGE_SNAPSHOT_MISMATCH`，不得重放旧成功结果 |
 | T08c 新快照复用 key | 同 key 使用另一份合法 preview（package fingerprint 相同但 validation fingerprint 不同） | `IDEMPOTENCY_KEY_REUSED`，不得重放旧结果 |
 | T09 key 复用 | 相同 key 换另一 package fingerprint 或 target mode 确认 | `IDEMPOTENCY_KEY_REUSED` |
 | T10 解析只读 | 在 parse 期间检查 drama/source/episode/asset 表 | 行数和内容均不改变 |
