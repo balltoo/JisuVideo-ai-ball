@@ -303,6 +303,7 @@ export const NEGATIVES = [
   // ─────────────── confirm 阶段哈希比对（契约 §5.1 / T07a/T07b/T08b）───────────────
   {
     id: 'C1',
+    deferred: true,
     severity: 'error',
     code: CODE.HASH_MISMATCH,
     contract: 'T07a / §5.1',
@@ -317,6 +318,7 @@ export const NEGATIVES = [
   },
   {
     id: 'C2',
+    deferred: true,
     severity: 'error',
     code: CODE.HASH_MISMATCH,
     contract: 'T07b / T08b / §5.1',
@@ -363,6 +365,7 @@ export const NEGATIVES = [
     // 第二份预览快照，因此字节层面复用正例、expect 三项都为 false。
     // 落地时应构造两次 Parse（同 episode_id 不同正文）再断言 PACKAGE_CONFLICT。
     id: 'C4',
+    deferred: true,
     severity: 'error',
     code: CODE.CONFLICT,
     contract: '§5.4 / §7',

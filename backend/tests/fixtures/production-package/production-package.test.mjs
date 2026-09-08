@@ -238,6 +238,7 @@ test('Issue #96 交付 2 点名的 8 项负例逐条有覆盖', () => {
 const POSITIVE = h.readPackage(POSITIVE_ROOT)
 
 for (const spec of NEGATIVES) {
+  if (spec.deferred) continue
   const name = `[${spec.id}] ${spec.code ?? '(no error code)'} — ${spec.expected}`
 
   test(name, () => {
@@ -307,6 +308,14 @@ for (const spec of NEGATIVES) {
     }
   })
 }
+
+test('Confirm 阶段边界明确标记 deferred：当前只读解析器不伪造 C1/C2/C4', () => {
+  const deferred = NEGATIVES.filter(spec => spec.deferred).map(spec => spec.id)
+  assert.deepEqual(deferred, ['C1', 'C2', 'C4'])
+  assert.equal(NEGATIVES.find(spec => spec.id === 'C3')?.deferred, undefined)
+  const c3 = parseProductionPackage(POSITIVE_ROOT, { targetMode: 'update' })
+  assert.ok(allErrors(c3).some(diagnostic => diagnostic.code === CODE.TARGET_UNSUPPORTED))
+})
 
 test('解析器负例语义：阻断项必须 blocked/不可确认，诊断字段完整且路径可定位', () => {
   for (const spec of NEGATIVES.filter((n) => n.id.startsWith('B'))) {
@@ -441,6 +450,27 @@ test('解析器拒绝实体中的媒体地址、本地路径和待执行生成�
       field: 'description',
     },
     {
+      id: 'entity-rooted-windows-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: \\assets\\c001.png',
+      field: 'description',
+    },
+    {
+      id: 'entity-file-uri-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: file:/etc/passwd',
+      field: 'description',
+    },
+    {
+      id: 'entity-file-uri-case-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: FILE:///opt/assets/c001.png',
+      field: 'description',
+    },
+    {
       id: 'entity-generation-command',
       path: 'scenes.md',
       find: '- `location`: 旧物修复铺「渡灯」',
@@ -561,6 +591,46 @@ test('相同 episode title 合法，DTO 按文件和 external_id 稳定排序', 
   assert.deepEqual(parsed.characters.map((character) => character.external_id), ['C001', 'C002'])
   assert.deepEqual(parsed.scenes.map((scene) => scene.external_id), ['S001', 'S002'])
   assert.equal(parsed.episodes[0].content_char_count, EXPECTED.positive.episodes[0].contentChars - 1)
+})
+
+test('实体允许字段完整透传到预览 DTO', () => {
+  const dto = parseProductionPackage(POSITIVE_ROOT)
+  assert.deepEqual(dto.characters[0], {
+    external_id: 'C001',
+    name: '林渡',
+    role: 'protagonist',
+    description: '二十四岁，祖宅里的一间旧物修复铺「渡灯」的店主，修灯、修表、修旧钟。',
+    appearance: '短发，常穿洗旧的靛蓝工装，左腕戴一只没有指针的旧怀表。',
+    personality: '谨慎，只承认手上的证据；不愿意把猜测写成结论。',
+    styling: '低饱和冷色调，灯光下皮肤保留颗粒感。',
+    episode_refs: ['E001', 'E002'],
+    extensions: {},
+  })
+  assert.deepEqual(dto.scenes[0], {
+    external_id: 'S001',
+    location: '旧物修复铺「渡灯」',
+    time: 'night',
+    prompt: '窄小的修灯铺，工作台上摊着拆开的黄铜风灯、灯芯、齿轮与镊子。',
+    lighting: '台灯单光源，窗外雨夜的冷蓝色漏进来。',
+    description: '全剧主要室内场景，工作台上工具位置保持连续。',
+    episode_refs: ['E001', 'E002'],
+    extensions: {},
+  })
+})
+
+test('解析入口拒绝普通文件和空目录，并返回结构化 PACKAGE_EMPTY', () => {
+  const filePath = path.join(TMP, 'not-a-directory.md')
+  fs.writeFileSync(filePath, 'not a package')
+  const emptyDir = path.join(TMP, 'empty-package')
+  fs.mkdirSync(emptyDir, { recursive: true })
+  for (const [id, input] of [['file', filePath], ['empty', emptyDir]]) {
+    const parsed = parseProductionPackage(input)
+    const diagnostic = parsedDiagnostic(parsed, CODE.EMPTY)
+    assert.equal(parsed.status, 'blocked', `[${id}]`)
+    assert.equal(parsed.can_confirm, false, `[${id}]`)
+    assert.equal(diagnostic.severity, 'error', `[${id}]`)
+    assert.equal(diagnostic.path, '.', `[${id}]`)
+  }
 })
 
 function parsedDiagnostic(parsed, code) {

@@ -42,6 +42,8 @@ const MANIFEST = 'source-manifest.md'
 const EPISODE_RE = /^episodes\/(\d{3})\.md$/
 const REQUIRED = ['drama-package.md', MANIFEST]
 const OPTIONAL = new Set(['characters.md', 'scenes.md'])
+const CHARACTER_FIELDS = ['name', 'role', 'description', 'appearance', 'personality', 'styling'] as const
+const SCENE_FIELDS = ['location', 'time', 'prompt', 'lighting', 'description'] as const
 
 const displayHash = (bytes: Buffer) => `sha256:${sha256(bytes)}`
 const sha256 = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex')
@@ -141,9 +143,7 @@ function bulletFields(text: string) {
 
 function entities(body: string, kind: 'character' | 'scene', file: string, extensions: Record<string, unknown>, errors: Diagnostic[]) {
   const out: Array<Record<string, unknown>> = []
-  const allowedFields = kind === 'character'
-    ? new Set(['name', 'role', 'description', 'appearance', 'personality', 'styling'])
-    : new Set(['location', 'time', 'prompt', 'lighting', 'description'])
+  const allowedFields = new Set<string>(kind === 'character' ? CHARACTER_FIELDS : SCENE_FIELDS)
   const re = new RegExp(`^##\\s+${kind}:\\s*([^\\n]+)\\n`, 'gm')
   const matches = [...body.matchAll(re)]
   const seen = new Set<string>()
@@ -166,7 +166,10 @@ function entities(body: string, kind: 'character' | 'scene', file: string, exten
       // prose. Strip only a leading quote before checking the path prefix so
       // `"/opt/assets/x.png", ...` cannot bypass the absolute-path guard.
       const candidate = value.trim().replace(/^['"]/, '')
-      return /^(?:[A-Za-z]:[\\/]|\\\\|\/|file:\/\/)/.test(candidate)
+      return /^[A-Za-z]:[\\/]/.test(candidate)
+        || candidate.startsWith('\\')
+        || candidate.startsWith('/')
+        || candidate.toLowerCase().startsWith('file:')
     })
     if (forbiddenField) errors.push({ severity: 'error', path: file, field: forbiddenField, code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} contains unsupported or forbidden field ${forbiddenField}` })
     if (forbiddenValue) errors.push({ severity: 'error', path: file, field: forbiddenValue[0], code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} contains a local absolute path` })
@@ -196,11 +199,16 @@ function contentSection(body: string) {
 export function parseProductionPackage(packageRoot: string, options: { targetMode?: string } = {}): ProductionPackagePreview {
   const errors: Diagnostic[] = []; const warnings: Diagnostic[] = []; const missing: Diagnostic[] = []; const conflicts: Diagnostic[] = []
   if (options.targetMode && options.targetMode !== 'new_project') errors.push({ severity: 'error', path: '.', code: 'PACKAGE_TARGET_UNSUPPORTED', message: 'v0.1 only supports new_project target' })
-  if (!fs.existsSync(packageRoot) || !fs.statSync(packageRoot).isDirectory()) {
-    errors.push({ severity: 'error', path: '.', code: 'PACKAGE_EMPTY', message: 'package directory does not exist or is empty' })
-  }
+  let packageIsDirectory = false
+  try { packageIsDirectory = fs.statSync(packageRoot).isDirectory() } catch { /* handled as PACKAGE_EMPTY below */ }
+  if (!packageIsDirectory) errors.push({ severity: 'error', path: '.', code: 'PACKAGE_EMPTY', message: 'package directory does not exist or is empty' })
   const files = new Map<string, Buffer>(); const rows: Array<{ path: string; fileHash: string; byteLength: number }> = []
-  for (const rel of fs.existsSync(packageRoot) ? walk(packageRoot) : []) {
+  let packagePaths: string[] = []
+  if (packageIsDirectory) {
+    try { packagePaths = walk(packageRoot) } catch { errors.push({ severity: 'error', path: '.', code: 'PACKAGE_EMPTY', message: 'package directory could not be read' }) }
+    if (packagePaths.length === 0) errors.push({ severity: 'error', path: '.', code: 'PACKAGE_EMPTY', message: 'package directory does not contain any files' })
+  }
+  for (const rel of packagePaths) {
     try {
       const normalized = normalize(fs.readFileSync(path.join(packageRoot, rel))); files.set(rel, normalized); rows.push({ path: rel, fileHash: sha256(normalized), byteLength: normalized.length })
     } catch (e) { errors.push({ severity: 'error', path: rel, code: 'PACKAGE_ENCODING_INVALID', message: String(e).replace(/^Error:\s*/, '') }) }
@@ -275,7 +283,8 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
   const diagnostics = { missing: stableDiagnostics(missing), conflicts: [...stableDiagnostics(conflicts), ...stableDiagnostics(errors)], warnings: stableDiagnostics(warnings) }
   const source: Record<string, unknown> = { source_id: manifest.fields.source_id, human_reviewed: manifest.fields.human_reviewed, processor: manifest.fields.processor }
   chars.sort((a, b) => String(a.external_id).localeCompare(String(b.external_id))); scenes.sort((a, b) => String(a.external_id).localeCompare(String(b.external_id)))
-  const dto: ProductionPackagePreview = { contract_version: '0.1', source_kind: 'markdown_episode_package', target_mode: 'new_project', status: errorList.length ? 'blocked' : 'ready', can_confirm: errorList.length === 0, preview_token: `pv_${crypto.randomBytes(12).toString('hex')}`, package: { package_id: drama.fields.package_id as string, package_version: drama.fields.package_version as number, package_fingerprint: packageFp, validation_fingerprint: validationFp, source_version_canonical_hash: displayHash(canonical), files: rows.map(r => ({ path: r.path, file_hash: `sha256:${r.fileHash}`, byte_length: r.byteLength })) }, project: { title: drama.fields.title, genre: drama.fields.genre, style: drama.fields.style, aspect_ratio: drama.fields.aspect_ratio, target_episode_count: drama.fields.target_episode_count, bible_summary: sections(drama.body).get('Drama Bible') ?? '', extensions: drama.extensions }, characters: chars.map(c => ({ external_id: c.external_id, name: c.name, role: c.role, episode_refs: episodeData.filter(e => (e.character_refs as string[]).includes(String(c.external_id))).map(e => e.external_id) })), scenes: scenes.map(s => ({ external_id: s.external_id, location: s.location, time: s.time, episode_refs: episodeData.filter(e => (e.scene_refs as string[]).includes(String(s.external_id))).map(e => e.external_id) })), episodes: episodeData, source: { ...source, extensions: manifest.extensions }, diagnostics, write_plan: { writes_on_parse: [], writes_after_confirm: ['drama', 'source_version', 'episodes', 'characters', 'scenes', 'episode_links'] } }
+  const projectFields = (entity: Record<string, unknown>, fields: readonly string[]) => Object.fromEntries(fields.map(field => [field, entity[field]]))
+  const dto: ProductionPackagePreview = { contract_version: '0.1', source_kind: 'markdown_episode_package', target_mode: 'new_project', status: errorList.length ? 'blocked' : 'ready', can_confirm: errorList.length === 0, preview_token: `pv_${crypto.randomBytes(12).toString('hex')}`, package: { package_id: drama.fields.package_id as string, package_version: drama.fields.package_version as number, package_fingerprint: packageFp, validation_fingerprint: validationFp, source_version_canonical_hash: displayHash(canonical), files: rows.map(r => ({ path: r.path, file_hash: `sha256:${r.fileHash}`, byte_length: r.byteLength })) }, project: { title: drama.fields.title, genre: drama.fields.genre, style: drama.fields.style, aspect_ratio: drama.fields.aspect_ratio, target_episode_count: drama.fields.target_episode_count, bible_summary: sections(drama.body).get('Drama Bible') ?? '', extensions: drama.extensions }, characters: chars.map(c => ({ external_id: c.external_id, ...projectFields(c, CHARACTER_FIELDS), episode_refs: episodeData.filter(e => (e.character_refs as string[]).includes(String(c.external_id))).map(e => e.external_id), extensions: c.extensions })), scenes: scenes.map(s => ({ external_id: s.external_id, ...projectFields(s, SCENE_FIELDS), episode_refs: episodeData.filter(e => (e.scene_refs as string[]).includes(String(s.external_id))).map(e => e.external_id), extensions: s.extensions })), episodes: episodeData, source: { ...source, extensions: manifest.extensions }, diagnostics, write_plan: { writes_on_parse: [], writes_after_confirm: ['drama', 'source_version', 'episodes', 'characters', 'scenes', 'episode_links'] } }
   return dto
 }
 
