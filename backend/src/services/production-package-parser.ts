@@ -154,7 +154,7 @@ function bulletFields(text: string) {
   const out: Record<string, string> = {}
   for (const line of text.split('\n')) {
     const m = line.match(/^\s*-\s+`([^`]+)`:\s*(.*)$/)
-    if (m) out[m[1]] = m[2].trim()
+    if (m) setOwn(out, m[1], m[2].trim())
   }
   return out
 }

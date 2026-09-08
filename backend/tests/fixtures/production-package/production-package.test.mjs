@@ -474,6 +474,25 @@ test('block scalar 中的 __proto__ 普通文本不得被误判为 YAML 键', ()
   assert.ok(parsed.diagnostics.warnings.some(d => d.path === 'drama-package.md' && d.field === 'extensions'))
 })
 
+test('实体 Markdown 的 __proto__ 字段不得被普通对象 setter 静默吞掉', () => {
+  for (const file of ['characters.md', 'scenes.md']) {
+    const dest = path.join(TMP, `markdown-proto-${file.replace('.md', '')}`)
+    h.copyPackage(POSITIVE_ROOT, dest)
+    const entityFile = path.join(dest, file)
+    fs.appendFileSync(entityFile, '\n- `__proto__`: leaked\n')
+    const fingerprint = h.readPackage(dest).packageFingerprint
+    const manifest = path.join(dest, 'source-manifest.md')
+    fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${fingerprint}`))
+    let parsed
+    assert.doesNotThrow(() => { parsed = parseProductionPackage(dest) }, `[${file}] 不得抛出未结构化异常`)
+    const diagnostic = parsedDiagnostic(parsed, CODE.FRONTMATTER_INVALID)
+    assert.equal(parsed.status, 'blocked', `[${file}]`)
+    assert.equal(parsed.can_confirm, false, `[${file}]`)
+    assert.equal(diagnostic.path, file, `[${file}]`)
+    assert.equal(diagnostic.field, '__proto__', `[${file}]`)
+  }
+})
+
 test('所有暴露到 DTO 的 front matter 与 extensions 均拒绝本地路径和凭据', () => {
   const cases = [
     {
