@@ -129,7 +129,7 @@ export const NEGATIVES = [
   {
     id: 'B4',
     severity: 'error',
-    code: CODE.FILE_MISSING,
+    code: CODE.EPISODE_INVALID,
     contract: 'T03 / §3.1',
     mutate: 'delete',
     target: 'episodes/001.md',

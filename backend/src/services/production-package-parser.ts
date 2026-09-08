@@ -34,7 +34,6 @@ export type ProductionPackagePreview = {
     missing: Diagnostic[]
     conflicts: Diagnostic[]
     warnings: Diagnostic[]
-    errors: Diagnostic[]
   }
   write_plan: { writes_on_parse: []; writes_after_confirm: string[] }
 }
@@ -85,7 +84,7 @@ const KNOWN_FRONT_MATTER_FIELDS = new Set([
   'audience', 'language', 'episode_id', 'episode_number', 'status',
   'source_id', 'source_kind', 'processed_at', 'processor', 'human_reviewed',
   'package_fingerprint', 'original_name', 'original_uri', 'original_content_hash',
-  'processing_steps',
+  'processing_steps', 'reviewer_note',
 ])
 
 function frontMatter(text: string, file: string, errors: Diagnostic[]) {
@@ -149,9 +148,24 @@ function entities(body: string, kind: 'character' | 'scene', file: string, exten
     const id = m[1].trim(); const end = i + 1 < matches.length ? matches[i + 1].index! : body.length
     const fields = bulletFields(body.slice(m.index! + m[0].length, end))
     if (seen.has(id)) errors.push({ severity: 'error', path: file, field: 'external_id', code: 'PACKAGE_DUPLICATE_ID', message: `duplicate ${kind} external_id ${id}` })
+    if (!/^[A-Za-z0-9._-]+$/.test(id)) errors.push({ severity: 'error', path: file, field: 'external_id', code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} external_id must be non-empty ASCII` })
     seen.add(id)
     if (kind === 'character' && !fields.name) errors.push({ severity: 'error', path: file, field: 'name', code: 'PACKAGE_FRONTMATTER_INVALID', message: `character ${id} requires name` })
     if (kind === 'scene' && (!fields.location || !fields.time)) errors.push({ severity: 'error', path: file, field: 'location/time', code: 'PACKAGE_FRONTMATTER_INVALID', message: `scene ${id} requires location and time` })
+    // Entity markdown is descriptive data only.  Media URLs, local filesystem
+    // paths and fields that look like deferred generation commands must be
+    // rejected explicitly so they are never silently dropped at import time.
+    // A plain `prompt` field remains valid descriptive prose in the v0.1
+    // sample; only generation-specific names are forbidden.
+    const forbiddenField = Object.keys(fields).find(field =>
+      field === 'image_url' || /(?:^|_)(?:final_)?(?:generation_?prompt|image_?prompt|video_?prompt|prompt_?to_?generate|instruction|generate_?command|generation_?instruction)$/i.test(field),
+    )
+    const forbiddenValue = Object.entries(fields).find(([field, value]) => {
+      if (typeof value !== 'string') return false
+      return /(?:^|[\\/])(?:[A-Za-z]:[\\/]|Users[\\/]|home[\\/]|var[\\/]|tmp[\\/])/.test(value) || /^\\\\/.test(value)
+    })
+    if (forbiddenField) errors.push({ severity: 'error', path: file, field: forbiddenField, code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} contains forbidden executable or media field ${forbiddenField}` })
+    else if (forbiddenValue) errors.push({ severity: 'error', path: file, field: forbiddenValue[0], code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} contains a local absolute path` })
     out.push({ external_id: id, ...fields, extensions })
   })
   return out
@@ -162,7 +176,9 @@ function extensionWarning(file: string, extensions: Record<string, unknown>, war
 }
 
 function stableDiagnostics(items: Diagnostic[]): Diagnostic[] {
-  return items.map(diagnostic => ({ ...diagnostic, field: diagnostic.field ?? '' }))
+  return items
+    .map(diagnostic => ({ ...diagnostic, field: diagnostic.field ?? '' }))
+    .sort((a, b) => `${a.path}\0${a.field}\0${a.code}\0${a.message}`.localeCompare(`${b.path}\0${b.field}\0${b.code}\0${b.message}`))
 }
 
 function contentSection(body: string) {
@@ -192,7 +208,7 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
   const validationFp = displayHash(Buffer.from(rows.map(r => `${r.path}\0${r.fileHash}\n`).join('')))
   const episodeRows = rows.filter(r => EPISODE_RE.test(r.path)).sort((a, b) => a.path.localeCompare(b.path))
   const episodeNumbers = episodeRows.map(r => Number(EPISODE_RE.exec(r.path)![1]))
-  if (!episodeNumbers.length || episodeNumbers[0] !== 1 || episodeNumbers.some((n, i) => n !== i + 1)) missing.push({ severity: 'error', path: 'episodes/', code: 'PACKAGE_FILE_MISSING', message: 'episode files must be numbered continuously from 001' })
+  if (!episodeNumbers.length || episodeNumbers[0] !== 1 || episodeNumbers.some((n, i) => n !== i + 1)) conflicts.push({ severity: 'error', path: 'episodes/', field: 'episode_number', code: 'PACKAGE_EPISODE_INVALID', message: 'episode files must be numbered continuously from 001' })
   const episodeData: Array<Record<string, unknown>> = []; const canonicalParts: Buffer[] = []
   for (const row of episodeRows) {
     const num = Number(EPISODE_RE.exec(row.path)![1]); const text = files.get(row.path)!.toString('utf8'); const fm = frontMatter(text, row.path, errors); extensionWarning(row.path, fm.extensions, warnings); const sec = sections(fm.body); const content = contentSection(fm.body)
@@ -228,6 +244,7 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
   if (typeof manifest.fields.source_id !== 'string' || !manifest.fields.source_id.trim()) errors.push({ severity: 'error', path: MANIFEST, field: 'source_id', code: 'PACKAGE_MANIFEST_INVALID', message: 'source_id must be a non-empty string' })
   if (!['external_prepared', 'external_episodic'].includes(String(manifest.fields.source_kind))) errors.push({ severity: 'error', path: MANIFEST, field: 'source_kind', code: 'PACKAGE_MANIFEST_INVALID', message: 'source_kind enum invalid' })
   if (typeof manifest.fields.processor !== 'string' || !manifest.fields.processor.trim()) errors.push({ severity: 'error', path: MANIFEST, field: 'processor', code: 'PACKAGE_MANIFEST_INVALID', message: 'processor must be a non-empty string' })
+  if (typeof manifest.fields.processor === 'string' && /(?:sk-[A-Za-z0-9_-]{8,}|(?:api[_-]?key|token|secret)\s*[:=])/i.test(manifest.fields.processor)) errors.push({ severity: 'error', path: MANIFEST, field: 'processor', code: 'PACKAGE_MANIFEST_INVALID', message: 'processor must not contain credentials or secret material' })
   if (manifest.fields.human_reviewed !== true) errors.push({ severity: 'error', path: MANIFEST, field: 'human_reviewed', code: 'PACKAGE_MANIFEST_INVALID', message: 'human_reviewed must be true' })
   const iso8601 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/
   const processedAt = typeof manifest.fields.processed_at === 'string' ? iso8601.exec(manifest.fields.processed_at) : null
@@ -242,8 +259,8 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
     if (typeof ep.title !== 'string' || !ep.title.trim()) errors.push({ severity: 'error', path: `episodes/${String(ep.episode_number).padStart(3, '0')}.md`, field: 'title', code: 'PACKAGE_EPISODE_INVALID', message: 'episode title is required' })
   }
   const canonical = Buffer.concat(canonicalParts)
-  const errorList = [...missing, ...errors]
-  const diagnostics = { missing: stableDiagnostics(missing), conflicts: stableDiagnostics(conflicts), warnings: stableDiagnostics(warnings), errors: stableDiagnostics(errorList) }
+  const errorList = [...missing, ...conflicts, ...errors]
+  const diagnostics = { missing: stableDiagnostics(missing), conflicts: [...stableDiagnostics(conflicts), ...stableDiagnostics(errors)], warnings: stableDiagnostics(warnings) }
   const source: Record<string, unknown> = { source_id: manifest.fields.source_id, human_reviewed: manifest.fields.human_reviewed, processor: manifest.fields.processor }
   chars.sort((a, b) => String(a.external_id).localeCompare(String(b.external_id))); scenes.sort((a, b) => String(a.external_id).localeCompare(String(b.external_id)))
   const dto: ProductionPackagePreview = { contract_version: '0.1', source_kind: 'markdown_episode_package', target_mode: 'new_project', status: errorList.length ? 'blocked' : 'ready', can_confirm: errorList.length === 0, preview_token: `pv_${crypto.randomBytes(12).toString('hex')}`, package: { package_id: drama.fields.package_id as string, package_version: drama.fields.package_version as number, package_fingerprint: packageFp, validation_fingerprint: validationFp, source_version_canonical_hash: displayHash(canonical), files: rows.map(r => ({ path: r.path, file_hash: `sha256:${r.fileHash}`, byte_length: r.byteLength })) }, project: { title: drama.fields.title, genre: drama.fields.genre, style: drama.fields.style, aspect_ratio: drama.fields.aspect_ratio, target_episode_count: drama.fields.target_episode_count, bible_summary: sections(drama.body).get('Drama Bible') ?? '', extensions: drama.extensions }, characters: chars.map(c => ({ external_id: c.external_id, name: c.name, role: c.role, episode_refs: episodeData.filter(e => (e.character_refs as string[]).includes(String(c.external_id))).map(e => e.external_id) })), scenes: scenes.map(s => ({ external_id: s.external_id, location: s.location, time: s.time, episode_refs: episodeData.filter(e => (e.scene_refs as string[]).includes(String(s.external_id))).map(e => e.external_id) })), episodes: episodeData, source: { ...source, extensions: manifest.extensions }, diagnostics, write_plan: { writes_on_parse: [], writes_after_confirm: ['drama', 'source_version', 'episodes', 'characters', 'scenes', 'episode_links'] } }

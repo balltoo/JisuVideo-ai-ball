@@ -270,7 +270,7 @@ for (const spec of NEGATIVES) {
     if (spec.expect.rejectsRead) {
       assert.throws(() => h.readPackage(dest), /PACKAGE_ENCODING_INVALID/)
       const parsed = parseProductionPackage(dest)
-      assert.ok(parsed.diagnostics.errors.some(d => d.code === spec.code), `[${spec.id}] 解析器应返回 ${spec.code}`)
+      assert.ok(allErrors(parsed).some(d => d.code === spec.code), `[${spec.id}] 解析器应返回 ${spec.code}`)
       return
     }
 
@@ -292,18 +292,18 @@ for (const spec of NEGATIVES) {
       expect.canonicalHashChanges,
       `canonical_hash 变化方向不符（${spec.contract}）`,
     )
-    const diagnosticCodes = [...parsed.diagnostics.errors, ...parsed.diagnostics.warnings].map(d => d.code).filter(Boolean)
+    const diagnosticCodes = [...allErrors(parsed), ...parsed.diagnostics.warnings].map(d => d.code).filter(Boolean)
     if (spec.severity === 'error' && spec.code && spec.id.startsWith('B')) {
-      assert.ok(parsed.diagnostics.errors.some(d => d.code === spec.code), `[${spec.id}] 解析器应返回 ${spec.code}`)
+      assert.ok(allErrors(parsed).some(d => d.code === spec.code), `[${spec.id}] 解析器应返回 ${spec.code}`)
     }
     if (spec.severity === 'warning') {
-      assert.equal(parsed.diagnostics.errors.length, 0, `[${spec.id}] 警告用例不得产生 error`)
+      assert.equal(allErrors(parsed).length, 0, `[${spec.id}] 警告用例不得产生 error`)
       if (spec.code) assert.ok(diagnosticCodes.includes(spec.code), `[${spec.id}] 解析器应返回 warning ${spec.code}`)
       assert.ok(parsed.diagnostics.warnings.length > 0, `[${spec.id}] 解析器应产生 warning`)
     }
     if (spec.id === 'C3') {
       const confirmPreview = parseProductionPackage(dest, { targetMode: 'update' })
-      assert.ok(confirmPreview.diagnostics.errors.some(d => d.code === CODE.TARGET_UNSUPPORTED), 'C3 必须阻断不支持的 target_mode')
+      assert.ok(allErrors(confirmPreview).some(d => d.code === CODE.TARGET_UNSUPPORTED), 'C3 必须阻断不支持的 target_mode')
     }
   })
 }
@@ -389,6 +389,83 @@ test('解析器严格校验 manifest、项目和剧集元数据边界', () => {
   }
 })
 
+test('解析器拒绝实体中的媒体地址、本地路径和待执行生成指令', () => {
+  const cases = [
+    {
+      id: 'entity-image-url',
+      path: 'characters.md',
+      find: '- `name`: 林渡',
+      replace: '- `name`: 林渡\n- `image_url`: https://example.invalid/c001.png',
+      field: 'image_url',
+    },
+    {
+      id: 'entity-local-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: C:\\assets\\c001.png',
+      field: 'description',
+    },
+    {
+      id: 'entity-generation-command',
+      path: 'scenes.md',
+      find: '- `location`: 旧物修复铺「渡灯」',
+      replace: '- `location`: 旧物修复铺「渡灯」\n- `generation_prompt`: generate an image now',
+      field: 'generation_prompt',
+    },
+  ]
+  for (const item of cases) {
+    const dest = path.join(TMP, item.id)
+    h.copyPackage(POSITIVE_ROOT, dest)
+    const file = path.join(dest, item.path)
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(item.find, item.replace))
+    const packageFingerprint = h.readPackage(dest).packageFingerprint
+    const manifest = path.join(dest, 'source-manifest.md')
+    fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${packageFingerprint}`))
+    const parsed = parseProductionPackage(dest)
+    const diagnostic = parsedDiagnostic(parsed, CODE.FRONTMATTER_INVALID)
+    assert.equal(parsed.status, 'blocked', `[${item.id}] 必须阻断`)
+    assert.equal(parsed.can_confirm, false, `[${item.id}] 不可确认`)
+    assert.equal(diagnostic.path, item.path)
+    assert.equal(diagnostic.field, item.field)
+    assert.match(diagnostic.message, /forbidden|local absolute/i)
+  }
+})
+
+test('角色和场景 external_id 必须是非空 ASCII 标识符', () => {
+  const cases = [
+    { id: 'character-id-space', path: 'characters.md', find: '## character: C001', replace: '## character: C 001' },
+    { id: 'scene-id-unicode', path: 'scenes.md', find: '## scene: S001', replace: '## scene: 场景一' },
+  ]
+  for (const item of cases) {
+    const dest = path.join(TMP, item.id)
+    h.copyPackage(POSITIVE_ROOT, dest)
+    const file = path.join(dest, item.path)
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(item.find, item.replace))
+    const packageFingerprint = h.readPackage(dest).packageFingerprint
+    const manifest = path.join(dest, 'source-manifest.md')
+    fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${packageFingerprint}`))
+    const parsed = parseProductionPackage(dest)
+    const diagnostic = parsedDiagnostic(parsed, CODE.FRONTMATTER_INVALID)
+    assert.equal(parsed.status, 'blocked')
+    assert.equal(diagnostic.path, item.path)
+    assert.equal(diagnostic.field, 'external_id')
+  }
+})
+
+test('manifest processor 不得携带疑似密钥材料', () => {
+  const dest = path.join(TMP, 'processor-secret')
+  h.copyPackage(POSITIVE_ROOT, dest)
+  const manifest = path.join(dest, 'source-manifest.md')
+  fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace('processor: "hand-authored-fixture 1.0"', 'processor: "tool sk-xxxxxxxxxxxxxxxx"'))
+  const packageFingerprint = h.readPackage(dest).packageFingerprint
+  fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${packageFingerprint}`))
+  const parsed = parseProductionPackage(dest)
+  const diagnostic = parsedDiagnostic(parsed, CODE.MANIFEST_INVALID)
+  assert.equal(parsed.status, 'blocked')
+  assert.equal(diagnostic.path, 'source-manifest.md')
+  assert.equal(diagnostic.field, 'processor')
+})
+
 test('相同 episode title 合法，DTO 按文件和 external_id 稳定排序', () => {
   const dest = path.join(TMP, 'same-title')
   h.copyPackage(POSITIVE_ROOT, dest)
@@ -406,9 +483,13 @@ test('相同 episode title 合法，DTO 按文件和 external_id 稳定排序', 
 })
 
 function parsedDiagnostic(parsed, code) {
-  const diagnostic = parsed.diagnostics.errors.find((item) => item.code === code)
+  const diagnostic = allErrors(parsed).find((item) => item.code === code)
   assert.ok(diagnostic, `未找到诊断 ${code}`)
   return diagnostic
+}
+
+function allErrors(parsed) {
+  return [...parsed.diagnostics.missing, ...parsed.diagnostics.conflicts]
 }
 
 test('C2 关键边界：只改 manifest 时 package_fingerprint 不变，validation_fingerprint 变', () => {
@@ -539,7 +620,9 @@ test('只读解析器正例 DTO 与指纹真值一致', () => {
   assert.deepEqual(dto.scenes.map(s => s.external_id), g.sceneIds)
   assert.deepEqual(dto.episodes.map(e => e.external_id), g.episodeIds)
   assert.deepEqual(dto.package.files.map(f => ({ path: f.path, fileHash: f.file_hash.replace(/^sha256:/, ''), byteLength: f.byte_length })), g.files)
-  assert.deepEqual(dto.diagnostics.errors, [])
+  assert.deepEqual(dto.diagnostics.missing, [])
+  assert.deepEqual(dto.diagnostics.conflicts, [])
+  assert.deepEqual(dto.diagnostics.warnings, [])
 })
 
 test('契约版本与 manifest 版本已登记', () => {
