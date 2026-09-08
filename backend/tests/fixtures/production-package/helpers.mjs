@@ -196,6 +196,7 @@ function walkRelPaths(root) {
  *
  * 变异类型与 manifest.mjs 的 `mutate` 字段一一对应：
  *   delete        —— 删除文件
+ *   delete-and-clear-refs —— 删除可选实体文件并移除对应集引用
  *   replace       —— 字符串替换（{find, with}）
  *   binary        —— 前置 BOM 字节（用于 B5 编码阻断）
  *   utf16le       —— 将完整文本写成无 BOM 的 UTF-16LE（用于 B11 编码阻断）
@@ -210,6 +211,13 @@ export function applyMutation(destRoot, spec) {
   switch (spec.mutate) {
     case 'delete':
       fs.rmSync(path.join(destRoot, spec.target), { force: true })
+      return
+    case 'delete-and-clear-refs':
+      fs.rmSync(path.join(destRoot, spec.target), { force: true })
+      for (const rel of walkRelPaths(destRoot)) {
+        if (!/^episodes\/\d{3}\.md$/.test(rel)) continue
+        modifyText(path.join(destRoot, rel), (s) => s.replace(spec.refPattern, ''))
+      }
       return
     case 'replace':
       modifyText(path.join(destRoot, spec.target), (s) => s.replace(spec.replace.find, spec.replace.with))

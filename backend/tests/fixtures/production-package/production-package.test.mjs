@@ -245,6 +245,28 @@ for (const spec of NEGATIVES) {
     h.copyPackage(POSITIVE_ROOT, dest)
     h.applyMutation(dest, spec)
 
+    // Warning-only mutations are valid packages after their manifest is
+    // regenerated. Keep the fixture focused on the warning semantics rather
+    // than making every W case fail secondarily with HASH_MISMATCH.
+    if (spec.severity === 'warning') {
+      if (spec.id === 'W1' || spec.id === 'W2') {
+        for (const episode of ['episodes/001.md', 'episodes/002.md']) {
+          const episodePath = path.join(dest, episode)
+          let episodeText = fs.readFileSync(episodePath, 'utf8')
+          const heading = spec.id === 'W1' ? 'Character Refs' : 'Scene Refs'
+          episodeText = episodeText.replace(new RegExp(`(## ${heading}\\n)(?:- .*\\n)+`), '$1')
+          fs.writeFileSync(episodePath, episodeText)
+        }
+      }
+      const mutatedForManifest = h.readPackage(dest)
+      const manifestPath = path.join(dest, 'source-manifest.md')
+      const manifestText = fs.readFileSync(manifestPath, 'utf8')
+      fs.writeFileSync(
+        manifestPath,
+        manifestText.replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${mutatedForManifest.packageFingerprint}`),
+      )
+    }
+
     if (spec.expect.rejectsRead) {
       assert.throws(() => h.readPackage(dest), /PACKAGE_ENCODING_INVALID/)
       const parsed = parseProductionPackage(dest)

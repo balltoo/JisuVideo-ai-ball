@@ -232,8 +232,9 @@ export const NEGATIVES = [
     // 用 null 显式标记，防止解析器把它误映射到 FILE_MISSING / FILE_UNEXPECTED。
     code: null,
     contract: 'T02 / §3.1',
-    mutate: 'delete',
+    mutate: 'delete-and-clear-refs',
     target: 'characters.md',
+    refPattern: /## Character Refs\n\n(?:- [^\n]+\n)+/g,
     expected: 'characters.md 为可选文件；缺省时 characters 数组为空，不得产生 error',
     expect: { packageFingerprintChanges: true, validationFingerprintChanges: true, canonicalHashChanges: false },
     note: '契约 §3.1 明确「没有人物时可省略」——若解析器报错即违反契约。',
@@ -243,8 +244,9 @@ export const NEGATIVES = [
     severity: 'warning',
     code: null, // 同 W1：可选文件缺失是预期内情形，不得产出 error
     contract: 'T02 / §3.1',
-    mutate: 'delete',
+    mutate: 'delete-and-clear-refs',
     target: 'scenes.md',
+    refPattern: /## Scene Refs\n\n(?:- [^\n]+\n)+/g,
     expected: 'scenes.md 为可选文件；缺省时 scenes 数组为空',
     expect: { packageFingerprintChanges: true, validationFingerprintChanges: true, canonicalHashChanges: false },
   },
@@ -255,9 +257,9 @@ export const NEGATIVES = [
     // 期望它作为 extension 记录并附 warning。
     code: null,
     contract: '§3.3 / §7',
-    mutate: 'insert-before',
+    mutate: 'insert-after',
     target: 'drama-package.md',
-    insertAfter: '---\n',
+    insertAfter: 'schema: jisu-production-package\n',
     text: 'custom_director: 某位导演\n',
     expected: '未识别 front matter 字段进入 extensions 并产生 warning；不得静默丢弃，也不得静默映射到数据库字段',
     expect: { packageFingerprintChanges: true, validationFingerprintChanges: true, canonicalHashChanges: false },
