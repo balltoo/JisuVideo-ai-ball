@@ -95,7 +95,13 @@ function toJsonSafe(value: unknown, active = new WeakSet<object>()): unknown {
   try {
     if (Array.isArray(value)) return value.map(item => toJsonSafe(item, active))
     const out: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) setOwn(out, key, toJsonSafe(item, active))
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      // Check parsed keys instead of raw YAML text: YAML permits explicit and
+      // alias keys that do not look like a regular `__proto__:` line. Keeping
+      // this guard here also applies to unknown nested extension mappings.
+      if (key === '__proto__') throw new Error('front matter key __proto__ is not allowed')
+      setOwn(out, key, toJsonSafe(item, active))
+    }
     return out
   } finally {
     active.delete(value)
@@ -115,13 +121,6 @@ function frontMatter(text: string, file: string, errors: Diagnostic[]) {
   const body = text.slice(end + closing[0].length)
   const fields: Record<string, unknown> = {}
   const extensions: Record<string, unknown> = {}
-  // js-yaml intentionally protects against prototype pollution by dropping a
-  // `__proto__` mapping key. For an import contract, silent dropping is worse:
-  // reject it explicitly so callers receive a stable diagnostic instead of a
-  // false ready preview. This also covers nested occurrences before parsing.
-  if (/(?:^|[\n{,])\s*(?:['"]__proto__['"]|__proto__)\s*:/.test(head)) {
-    errors.push({ severity: 'error', path: file, field: '__proto__', code: 'PACKAGE_FRONTMATTER_INVALID', message: 'front matter key __proto__ is not allowed' })
-  }
   let parsed: unknown
   try {
     // DEFAULT_SCHEMA is still the safe js-yaml schema, but unlike JSON_SCHEMA
@@ -129,7 +128,8 @@ function frontMatter(text: string, file: string, errors: Diagnostic[]) {
     // result immediately to JSON-safe values and reject cyclic aliases.
     parsed = toJsonSafe(yaml.load(head, { schema: yaml.DEFAULT_SCHEMA }))
   } catch (error) {
-    errors.push({ severity: 'error', path: file, code: 'PACKAGE_FRONTMATTER_INVALID', message: `invalid YAML front matter: ${error instanceof Error ? error.message : String(error)}` })
+    const message = error instanceof Error ? error.message : String(error)
+    errors.push({ severity: 'error', path: file, field: message === 'front matter key __proto__ is not allowed' ? '__proto__' : undefined, code: 'PACKAGE_FRONTMATTER_INVALID', message: `invalid YAML front matter: ${message}` })
     return { fields, extensions, body }
   }
   if (parsed !== undefined && (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))) {

@@ -432,12 +432,15 @@ test('标准 YAML !!set 未知扩展可安全保留，循环 alias 返回结构�
   assert.match(cycleDiagnostic.message, /cyclic|alias/i)
 })
 
-test('__proto__ 未知键不得静默丢弃：顶层和嵌套写法都返回结构化阻断', () => {
+test('__proto__ 未知键不得静默丢弃：所有 YAML 键写法都返回结构化阻断', () => {
   const cases = [
     { id: 'top-level', yaml: '__proto__:\n  leaked: yes\n', field: '__proto__' },
     { id: 'nested', yaml: 'custom:\n  __proto__:\n    leaked: yes\n', field: '__proto__' },
     { id: 'quoted-nested', yaml: 'custom:\n  "__proto__":\n    leaked: yes\n', field: '__proto__' },
     { id: 'inline-mapping', yaml: 'custom: { __proto__: { leaked: yes } }\n', field: '__proto__' },
+    { id: 'explicit-top-level', yaml: '? __proto__\n: { leaked: yes }\n', field: '__proto__' },
+    { id: 'explicit-nested', yaml: 'custom:\n  ? __proto__\n  : { leaked: yes }\n', field: '__proto__' },
+    { id: 'alias-key', yaml: 'proto_name: &p __proto__\n? *p\n: { leaked: yes }\n', field: '__proto__' },
   ]
   for (const item of cases) {
     const dest = path.join(TMP, `yaml-proto-${item.id}`)
@@ -455,6 +458,20 @@ test('__proto__ 未知键不得静默丢弃：顶层和嵌套写法都返回结�
     assert.equal(diagnostic.path, 'drama-package.md', `[${item.id}]`)
     assert.equal(diagnostic.field, item.field, `[${item.id}]`)
   }
+})
+
+test('block scalar 中的 __proto__ 普通文本不得被误判为 YAML 键', () => {
+  const dest = path.join(TMP, 'yaml-proto-in-block-scalar')
+  h.copyPackage(POSITIVE_ROOT, dest)
+  const drama = path.join(dest, 'drama-package.md')
+  fs.writeFileSync(drama, fs.readFileSync(drama, 'utf8').replace('genre: 悬疑', 'genre: 悬疑\ncustom_note: |-\n  __proto__: this is ordinary prose'))
+  const fingerprint = h.readPackage(dest).packageFingerprint
+  const manifest = path.join(dest, 'source-manifest.md')
+  fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${fingerprint}`))
+  const parsed = parseProductionPackage(dest)
+  assert.equal(parsed.status, 'ready')
+  assert.equal(parsed.project.extensions.custom_note, '__proto__: this is ordinary prose')
+  assert.ok(parsed.diagnostics.warnings.some(d => d.path === 'drama-package.md' && d.field === 'extensions'))
 })
 
 test('所有暴露到 DTO 的 front matter 与 extensions 均拒绝本地路径和凭据', () => {
