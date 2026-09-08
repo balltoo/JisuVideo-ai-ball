@@ -373,6 +373,88 @@ test('解析器警告语义：W1-W5 不阻断，未知字段进入 extensions', 
   }
 })
 
+test('YAML block scalar 可解析；未知列表字段进入 extensions 并产生 warning', () => {
+  const blockScalar = path.join(TMP, 'yaml-block-scalar')
+  h.copyPackage(POSITIVE_ROOT, blockScalar)
+  const blockManifest = path.join(blockScalar, 'source-manifest.md')
+  fs.writeFileSync(
+    blockManifest,
+    fs.readFileSync(blockManifest, 'utf8').replace(
+      'reviewer_note: "原创虚构内容，仅用于 #96 验收样本；不代表真实项目，不含第三方版权、隐私或密钥。"',
+      'reviewer_note: |-\n  已由人工复核\n  可追溯到验收记录',
+    ),
+  )
+  const blockFingerprint = h.readPackage(blockScalar).packageFingerprint
+  fs.writeFileSync(blockManifest, fs.readFileSync(blockManifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${blockFingerprint}`))
+  const parsedBlock = parseProductionPackage(blockScalar)
+  assert.equal(parsedBlock.status, 'ready')
+  assert.equal(parsedBlock.diagnostics.warnings.length, 0)
+
+  const listExtension = path.join(TMP, 'yaml-list-extension')
+  h.copyPackage(POSITIVE_ROOT, listExtension)
+  const drama = path.join(listExtension, 'drama-package.md')
+  fs.writeFileSync(drama, fs.readFileSync(drama, 'utf8').replace('genre: 悬疑', 'genre: 悬疑\ncustom_tags:\n  - noir\n  - mystery'))
+  const listFingerprint = h.readPackage(listExtension).packageFingerprint
+  const listManifest = path.join(listExtension, 'source-manifest.md')
+  fs.writeFileSync(listManifest, fs.readFileSync(listManifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${listFingerprint}`))
+  const parsedList = parseProductionPackage(listExtension)
+  assert.equal(parsedList.status, 'ready')
+  assert.deepEqual(parsedList.project.extensions.custom_tags, ['noir', 'mystery'])
+  assert.ok(parsedList.diagnostics.warnings.some(d => d.path === 'drama-package.md' && d.field === 'extensions'))
+})
+
+test('所有暴露到 DTO 的 front matter 与 extensions 均拒绝本地路径和凭据', () => {
+  const cases = [
+    {
+      id: 'project-path',
+      file: 'drama-package.md',
+      find: 'genre: 悬疑',
+      replace: 'genre: C:\\internal\\private.txt',
+      path: 'drama-package.md',
+      field: 'project.genre',
+    },
+    {
+      id: 'project-file-uri',
+      file: 'drama-package.md',
+      find: 'title: 灯下旧物',
+      replace: 'title: file:///private/title.txt',
+      path: 'drama-package.md',
+      field: 'project.title',
+    },
+    {
+      id: 'episode-path',
+      file: 'episodes/001.md',
+      find: 'title: 夹层里的名片',
+      replace: 'title: /private/episode-title.txt',
+      path: 'episodes/',
+      field: 'episodes[0].title',
+    },
+    {
+      id: 'source-extension-secret',
+      file: 'source-manifest.md',
+      find: 'source_kind: external_episodic',
+      replace: 'source_kind: external_episodic\ncustom_credentials:\n  api_key: real-secret-value',
+      path: 'source-manifest.md',
+      field: 'source.extensions.custom_credentials.api_key',
+    },
+  ]
+  for (const item of cases) {
+    const dest = path.join(TMP, `dto-exposure-${item.id}`)
+    h.copyPackage(POSITIVE_ROOT, dest)
+    const target = path.join(dest, item.file)
+    fs.writeFileSync(target, fs.readFileSync(target, 'utf8').replace(item.find, item.replace))
+    const fingerprint = h.readPackage(dest).packageFingerprint
+    const manifest = path.join(dest, 'source-manifest.md')
+    fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${fingerprint}`))
+    const parsed = parseProductionPackage(dest)
+    const diagnostic = parsedDiagnostic(parsed, CODE.FRONTMATTER_INVALID)
+    assert.equal(parsed.status, 'blocked', `[${item.id}]`)
+    assert.equal(parsed.can_confirm, false, `[${item.id}]`)
+    assert.equal(diagnostic.path, item.path, `[${item.id}]`)
+    assert.equal(diagnostic.field, item.field, `[${item.id}]`)
+  }
+})
+
 test('解析器严格校验 manifest、项目和剧集元数据边界', () => {
   const cases = [
     { id: 'manifest-source-kind', path: 'source-manifest.md', find: 'source_kind: external_episodic', replace: 'source_kind: short_text', code: CODE.MANIFEST_INVALID, field: 'source_kind' },

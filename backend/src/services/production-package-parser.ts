@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import yaml from 'js-yaml'
 
 export type Diagnostic = {
   severity: 'error' | 'warning'
@@ -71,15 +72,6 @@ function walk(root: string): string[] {
   return result.sort()
 }
 
-function scalar(value: string): unknown {
-  const v = value.trim()
-  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) return v.slice(1, -1)
-  if (v === 'true') return true
-  if (v === 'false') return false
-  if (/^-?\d+$/.test(v)) return Number(v)
-  return v
-}
-
 const KNOWN_FRONT_MATTER_FIELDS = new Set([
   'schema', 'schema_version', 'package_id', 'package_version', 'title',
   'target_episode_count', 'genre', 'style', 'aspect_ratio', 'logline',
@@ -102,23 +94,18 @@ function frontMatter(text: string, file: string, errors: Diagnostic[]) {
   const body = text.slice(end + closing[0].length)
   const fields: Record<string, unknown> = {}
   const extensions: Record<string, unknown> = {}
-  if (start > 0) {
-    for (const line of text.slice(0, start).split('\n')) {
-      const m = line.match(/^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/)
-      if (m) extensions[m[1]] = scalar(m[2])
-    }
+  let parsed: unknown
+  try {
+    parsed = yaml.load(head, { schema: yaml.JSON_SCHEMA })
+  } catch (error) {
+    errors.push({ severity: 'error', path: file, code: 'PACKAGE_FRONTMATTER_INVALID', message: `invalid YAML front matter: ${error instanceof Error ? error.message : String(error)}` })
+    return { fields, extensions, body }
   }
-  let arrayKey: string | null = null
-  for (const line of head.split('\n')) {
-    if (!line.trim()) continue
-    const item = line.match(/^\s*-\s+(.*)$/)
-    if (item && arrayKey) { (fields[arrayKey] as unknown[]).push(scalar(item[1])); continue }
-    const m = line.match(/^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/)
-    if (!m) { errors.push({ severity: 'error', path: file, code: 'PACKAGE_FRONTMATTER_INVALID', message: `invalid front matter line: ${line}` }); continue }
-    const [, key, raw] = m
-    if (!raw) { fields[key] = []; arrayKey = key; continue }
-    arrayKey = null
-    const value = scalar(raw)
+  if (parsed !== undefined && (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))) {
+    errors.push({ severity: 'error', path: file, code: 'PACKAGE_FRONTMATTER_INVALID', message: 'front matter must be a YAML mapping' })
+    return { fields, extensions, body }
+  }
+  for (const [key, value] of Object.entries((parsed ?? {}) as Record<string, unknown>)) {
     ;(KNOWN_FRONT_MATTER_FIELDS.has(key) ? fields : extensions)[key] = value
   }
   return { fields, extensions, body }
@@ -180,6 +167,41 @@ function entities(body: string, kind: 'character' | 'scene', file: string, exten
 
 function extensionWarning(file: string, extensions: Record<string, unknown>, warnings: Diagnostic[]) {
   if (Object.keys(extensions).length) warnings.push({ severity: 'warning', path: file, field: 'extensions', code: 'PACKAGE_FILE_UNEXPECTED', message: `unknown front matter fields: ${Object.keys(extensions).sort().join(', ')}` })
+}
+
+function unsafeExposedValue(value: unknown): 'path' | 'secret' | null {
+  if (typeof value !== 'string') return null
+  const candidate = value.trim().replace(/^['"]/, '')
+  if (/^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith('\\') || candidate.startsWith('/') || candidate.toLowerCase().startsWith('file:')) return 'path'
+  if (/(?:sk-[A-Za-z0-9_-]{4,}|(?:api[_-]?key|token|secret|password|authorization)\s*(?::|=|\s)\s*\S+|bearer\s+\S+)/i.test(candidate)) return 'secret'
+  return null
+}
+
+function collectUnsafeExposedValues(value: unknown, pathPrefix: string, fieldPrefix: string, diagnostics: Diagnostic[]) {
+  const unsafe = unsafeExposedValue(value)
+  if (unsafe) {
+    diagnostics.push({
+      severity: 'error',
+      path: pathPrefix,
+      field: fieldPrefix,
+      code: 'PACKAGE_FRONTMATTER_INVALID',
+      message: unsafe === 'path' ? 'DTO contains a local absolute path or file URI' : 'DTO contains credential or secret material',
+    })
+    return
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectUnsafeExposedValues(item, pathPrefix, `${fieldPrefix}[${index}]`, diagnostics))
+    return
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (/(?:api[_-]?key|token|secret|password|authorization)/i.test(key) && item !== undefined && item !== null && item !== '') {
+        diagnostics.push({ severity: 'error', path: pathPrefix, field: fieldPrefix ? `${fieldPrefix}.${key}` : key, code: 'PACKAGE_FRONTMATTER_INVALID', message: 'DTO contains credential or secret material' })
+        continue
+      }
+      collectUnsafeExposedValues(item, pathPrefix, fieldPrefix ? `${fieldPrefix}.${key}` : key, diagnostics)
+    }
+  }
 }
 
 function stableDiagnostics(items: Diagnostic[]): Diagnostic[] {
@@ -253,7 +275,7 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
   if (!Number.isInteger(drama.fields.package_version) || (drama.fields.package_version as number) < 1) errors.push({ severity: 'error', path: 'drama-package.md', field: 'package_version', code: 'PACKAGE_FRONTMATTER_INVALID', message: 'package_version must be a positive integer' })
   if (!Number.isInteger(drama.fields.target_episode_count) || (drama.fields.target_episode_count as number) < 1) errors.push({ severity: 'error', path: 'drama-package.md', field: 'target_episode_count', code: 'PACKAGE_EPISODE_INVALID', message: 'target_episode_count must be a positive integer' })
   if (Number(drama.fields.target_episode_count) !== episodeData.length) errors.push({ severity: 'error', path: 'drama-package.md', field: 'target_episode_count', code: 'PACKAGE_EPISODE_INVALID', message: 'target episode count does not match files' })
-  if (Object.keys(drama.extensions).length) warnings.push({ severity: 'warning', path: 'drama-package.md', code: 'PACKAGE_FILE_UNEXPECTED', message: `unknown front matter fields: ${Object.keys(drama.extensions).join(', ')}` })
+  if (Object.keys(drama.extensions).length) warnings.push({ severity: 'warning', path: 'drama-package.md', field: 'extensions', code: 'PACKAGE_FILE_UNEXPECTED', message: `unknown front matter fields: ${Object.keys(drama.extensions).join(', ')}` })
   if (!(sections(drama.body).get('Drama Bible') ?? '').trim()) warnings.push({ severity: 'warning', path: 'drama-package.md', field: 'Drama Bible', code: 'PACKAGE_FILE_UNEXPECTED', message: 'Drama Bible is empty' })
   const manifestRequired = ['schema_version', 'source_id', 'source_kind', 'processed_at', 'processor', 'human_reviewed', 'package_fingerprint']
   extensionWarning(MANIFEST, manifest.extensions, warnings)
@@ -285,6 +307,20 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
   chars.sort((a, b) => String(a.external_id).localeCompare(String(b.external_id))); scenes.sort((a, b) => String(a.external_id).localeCompare(String(b.external_id)))
   const projectFields = (entity: Record<string, unknown>, fields: readonly string[]) => Object.fromEntries(fields.map(field => [field, entity[field]]))
   const dto: ProductionPackagePreview = { contract_version: '0.1', source_kind: 'markdown_episode_package', target_mode: 'new_project', status: errorList.length ? 'blocked' : 'ready', can_confirm: errorList.length === 0, preview_token: `pv_${crypto.randomBytes(12).toString('hex')}`, package: { package_id: drama.fields.package_id as string, package_version: drama.fields.package_version as number, package_fingerprint: packageFp, validation_fingerprint: validationFp, source_version_canonical_hash: displayHash(canonical), files: rows.map(r => ({ path: r.path, file_hash: `sha256:${r.fileHash}`, byte_length: r.byteLength })) }, project: { title: drama.fields.title, genre: drama.fields.genre, style: drama.fields.style, aspect_ratio: drama.fields.aspect_ratio, target_episode_count: drama.fields.target_episode_count, bible_summary: sections(drama.body).get('Drama Bible') ?? '', extensions: drama.extensions }, characters: chars.map(c => ({ external_id: c.external_id, ...projectFields(c, CHARACTER_FIELDS), episode_refs: episodeData.filter(e => (e.character_refs as string[]).includes(String(c.external_id))).map(e => e.external_id), extensions: c.extensions })), scenes: scenes.map(s => ({ external_id: s.external_id, ...projectFields(s, SCENE_FIELDS), episode_refs: episodeData.filter(e => (e.scene_refs as string[]).includes(String(s.external_id))).map(e => e.external_id), extensions: s.extensions })), episodes: episodeData, source: { ...source, extensions: manifest.extensions }, diagnostics, write_plan: { writes_on_parse: [], writes_after_confirm: ['drama', 'source_version', 'episodes', 'characters', 'scenes', 'episode_links'] } }
+  const exposedDiagnostics: Diagnostic[] = []
+  collectUnsafeExposedValues(dto.project, 'drama-package.md', 'project', exposedDiagnostics)
+  // Character/scene allowlisted fields are already checked at parse time;
+  // scan their extensions here to catch nested untrusted values without
+  // duplicating the same field diagnostic in the preview.
+  collectUnsafeExposedValues(dto.characters.map(character => character.extensions), 'characters.md', 'characters.extensions', exposedDiagnostics)
+  collectUnsafeExposedValues(dto.scenes.map(scene => scene.extensions), 'scenes.md', 'scenes.extensions', exposedDiagnostics)
+  collectUnsafeExposedValues(dto.episodes, 'episodes/', 'episodes', exposedDiagnostics)
+  collectUnsafeExposedValues(dto.source.extensions, MANIFEST, 'source.extensions', exposedDiagnostics)
+  if (exposedDiagnostics.length) {
+    dto.status = 'blocked'
+    dto.can_confirm = false
+    dto.diagnostics.conflicts = stableDiagnostics([...dto.diagnostics.conflicts, ...exposedDiagnostics])
+  }
   return dto
 }
 
