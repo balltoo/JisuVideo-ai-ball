@@ -49,6 +49,10 @@ const SCENE_FIELDS = ['location', 'time', 'prompt', 'lighting', 'description'] a
 const displayHash = (bytes: Buffer) => `sha256:${sha256(bytes)}`
 const sha256 = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex')
 
+function setOwn(target: Record<string, unknown>, key: string, value: unknown) {
+  Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true })
+}
+
 function normalize(raw: Buffer): Buffer {
   if (raw.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) throw new Error('PACKAGE_ENCODING_INVALID: UTF-8 BOM is not allowed')
   if (raw.includes(0)) throw new Error('PACKAGE_ENCODING_INVALID: NUL byte / binary or UTF-16 content is not allowed')
@@ -91,7 +95,7 @@ function toJsonSafe(value: unknown, active = new WeakSet<object>()): unknown {
   try {
     if (Array.isArray(value)) return value.map(item => toJsonSafe(item, active))
     const out: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = toJsonSafe(item, active)
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) setOwn(out, key, toJsonSafe(item, active))
     return out
   } finally {
     active.delete(value)
@@ -111,6 +115,13 @@ function frontMatter(text: string, file: string, errors: Diagnostic[]) {
   const body = text.slice(end + closing[0].length)
   const fields: Record<string, unknown> = {}
   const extensions: Record<string, unknown> = {}
+  // js-yaml intentionally protects against prototype pollution by dropping a
+  // `__proto__` mapping key. For an import contract, silent dropping is worse:
+  // reject it explicitly so callers receive a stable diagnostic instead of a
+  // false ready preview. This also covers nested occurrences before parsing.
+  if (/(?:^|[\n{,])\s*(?:['"]__proto__['"]|__proto__)\s*:/.test(head)) {
+    errors.push({ severity: 'error', path: file, field: '__proto__', code: 'PACKAGE_FRONTMATTER_INVALID', message: 'front matter key __proto__ is not allowed' })
+  }
   let parsed: unknown
   try {
     // DEFAULT_SCHEMA is still the safe js-yaml schema, but unlike JSON_SCHEMA
@@ -126,7 +137,7 @@ function frontMatter(text: string, file: string, errors: Diagnostic[]) {
     return { fields, extensions, body }
   }
   for (const [key, value] of Object.entries((parsed ?? {}) as Record<string, unknown>)) {
-    ;(KNOWN_FRONT_MATTER_FIELDS.has(key) ? fields : extensions)[key] = value
+    setOwn(KNOWN_FRONT_MATTER_FIELDS.has(key) ? fields : extensions, key, value)
   }
   return { fields, extensions, body }
 }
