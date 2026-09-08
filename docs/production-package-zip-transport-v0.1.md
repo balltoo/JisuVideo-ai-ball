@@ -113,6 +113,7 @@ ZIP 原始字节
 
 ### 4.3 `preview_token`
 
+- `parseProductionPackage()` 返回的 DTO 可能带有解析器内部生成的 `preview_token`；该值不是传输层 token，Preview API 必须丢弃它；
 - token 为至少 192 bit 熵的不透明随机值，使用 URL 安全编码；
 - token 只引用服务端快照，不编码或暴露服务器路径；
 - token 绑定用户/租户、snapshot、package/validation fingerprint 和 `target_mode`；
@@ -120,6 +121,8 @@ ZIP 原始字节
 - token 不可跨用户使用；
 - token 不能单独作为 Confirm 身份，Confirm 仍需提交契约规定的 fingerprint 和幂等 key；
 - token、快照和临时目录清理是同一生命周期，清理失败必须可重试并可观测。
+
+Preview API 对外只返回上述快照 token，并覆盖 parser DTO 中原有的 `preview_token` 字段；客户端和后续 Confirm 不得看到或依赖 parser 生成的内部 token。若未来改为由调用方把 token 注入 parser，必须另行更新本契约和接口测试，不能让两种 token 同时对外存在。
 
 ## 5. 错误语义
 
@@ -134,9 +137,11 @@ ZIP 原始字节
 | `PACKAGE_ARCHIVE_ROOT_AMBIGUOUS` | 无法唯一定位生产包根 | 否 |
 | `PACKAGE_PREVIEW_NOT_FOUND` | token 对应快照不存在或已清理 | 否 |
 | `PACKAGE_PREVIEW_EXPIRED` | token 超过 TTL | 否 |
-| `PACKAGE_HASH_MISMATCH` | Confirm 时当前快照/文件 hash 与预览不一致 | 否，先于幂等查询 |
+| `PACKAGE_SNAPSHOT_MISMATCH` | Confirm 时当前快照/文件 hash 与预览不一致 | 否，先于幂等查询 |
 
 所有传输层错误必须返回稳定的 `code`、`severity=error` 和面向用户的 `message`。不得返回临时目录、服务器本地绝对路径、归档内部堆栈、密钥或用户隐私。
+
+注意：`PACKAGE_HASH_MISMATCH` 只表示 parser 发现 `source-manifest.md` 声明的 `package_fingerprint` 与当前包计算值不一致；Confirm 在预览快照与当前内容不一致时必须使用 `PACKAGE_SNAPSHOT_MISMATCH`，不得把快照变化伪装成 manifest 字段错误。
 
 ## 6. 清理、隔离与观测
 
@@ -172,7 +177,7 @@ ZIP 原始字节
 - [ ] token 过期、快照清理后访问均返回对应错误；
 - [ ] 重复解析同一 ZIP 得到相同 parser 指纹和 DTO（运行时 token 除外）；
 - [ ] 预览阶段重复上传不会创建正式项目；
-- [ ] 快照内容发生变化时，Confirm 在幂等查询前返回 `PACKAGE_HASH_MISMATCH`。
+- [ ] 快照内容发生变化时，Confirm 在幂等查询前返回 `PACKAGE_SNAPSHOT_MISMATCH`；parser 自身的 manifest 指纹错误仍保持 `PACKAGE_HASH_MISMATCH`。
 
 ## 8. 后续任务边界
 

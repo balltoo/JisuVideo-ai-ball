@@ -37,6 +37,7 @@ export const CODE = {
   EPISODE_INVALID: 'PACKAGE_EPISODE_INVALID',
   REFERENCE_UNKNOWN: 'PACKAGE_REFERENCE_UNKNOWN',
   HASH_MISMATCH: 'PACKAGE_HASH_MISMATCH',
+  SNAPSHOT_MISMATCH: 'PACKAGE_SNAPSHOT_MISMATCH',
   TARGET_UNSUPPORTED: 'PACKAGE_TARGET_UNSUPPORTED',
   IDEMPOTENCY_KEY_REUSED: 'IDEMPOTENCY_KEY_REUSED',
   CONFLICT: 'PACKAGE_CONFLICT',
@@ -305,7 +306,7 @@ export const NEGATIVES = [
     id: 'C1',
     deferred: true,
     severity: 'error',
-    code: CODE.HASH_MISMATCH,
+    code: CODE.SNAPSHOT_MISMATCH,
     contract: 'T07a / §5.1',
     mutate: 'replace',
     target: 'episodes/002.md',
@@ -313,19 +314,19 @@ export const NEGATIVES = [
       find: '那个年份是林渡出生的年份。',
       with: '那个年份是林渡出生的年份，而这一年灯行已经拆了。',
     },
-    expected: '预览后修改任一非 manifest 文件再确认，返回 PACKAGE_HASH_MISMATCH，不进入幂等查询、不重放旧结果',
+    expected: '预览后修改任一非 manifest 文件再确认，返回 PACKAGE_SNAPSHOT_MISMATCH，不进入幂等查询、不重放旧结果',
     expect: { packageFingerprintChanges: true, validationFingerprintChanges: true, canonicalHashChanges: true },
   },
   {
     id: 'C2',
     deferred: true,
     severity: 'error',
-    code: CODE.HASH_MISMATCH,
+    code: CODE.SNAPSHOT_MISMATCH,
     contract: 'T07b / T08b / §5.1',
     mutate: 'replace',
     target: 'source-manifest.md',
     replace: { find: 'reviewer_note: "原创虚构内容', with: 'reviewer_note: "补充：原创虚构内容' },
-    expected: '只改 manifest（例如 reviewer_note）也必须返回 PACKAGE_HASH_MISMATCH，不得重放旧成功结果',
+    expected: '只改 manifest（例如 reviewer_note）也必须返回 PACKAGE_SNAPSHOT_MISMATCH，不得重放旧成功结果',
     expect: { packageFingerprintChanges: false, validationFingerprintChanges: true, canonicalHashChanges: false },
     note: '关键边界：manifest 被排除在 package_fingerprint 之外，所以 package_fingerprint 不变；只有 validation_fingerprint 变。Confirm 必须校验全部文件（含 manifest），否则此例会被静默接受。这也是 #95 补充实施裁决第 2 条要单独引入 validation_fingerprint 的原因。',
   },
@@ -334,7 +335,7 @@ export const NEGATIVES = [
   {
     // Issue #96 交付 2 点名项「导入更新冲突」。契约 §5.4 第 1 条明确 v0.1 只支持
     // 新建项目，因此「更新已有项目」不属于哈希问题，应返回 PACKAGE_TARGET_UNSUPPORTED。
-    // 这与 C1/C2 的 PACKAGE_HASH_MISMATCH 是**不同错误码、不同判定阶段**：
+    // 这与 C1/C2 的 PACKAGE_SNAPSHOT_MISMATCH 是**不同错误码、不同判定阶段**：
     // C1/C2 在快照校验阶段失败，本条在 target_mode 校验阶段失败。
     //
     // 注意：这条是**语义期望登记**，不是字节变异。它没有任何文件改动，
@@ -358,7 +359,7 @@ export const NEGATIVES = [
     // Issue #96 交付 2 点名项「导入更新冲突」的另一半：同集号不同正文。
     // 契约 §5.4 第 2 条把「同集号不同正文」列为阻断冲突。这里的表现是
     // 预览快照与当前包不一致（用户改了内容但沿用同一集号），
-    // 走 PACKAGE_CONFLICT 而不是 PACKAGE_HASH_MISMATCH——后者是「包在预览后变了」，
+    // 走 PACKAGE_CONFLICT 而不是 PACKAGE_SNAPSHOT_MISMATCH——后者是「包在预览后变了」，
     // 前者是「包内部/跨预览的语义冲突」。
     //
     // 同样为**语义期望登记**：本 fixture 只有两集，无法制造「同集号不同正文」的

@@ -827,7 +827,7 @@ test('C2 关键边界：只改 manifest 时 package_fingerprint 不变，validat
   // 这是 #95 补充实施裁决第 2 条要单独引入 validation_fingerprint 的全部理由。
   assert.equal(mutated.packageFingerprint, positive.packageFingerprint)
   assert.notEqual(mutated.validationFingerprint, positive.validationFingerprint)
-  assert.equal(spec.code, CODE.HASH_MISMATCH)
+  assert.equal(spec.code, CODE.SNAPSHOT_MISMATCH)
 })
 
 test('B3 关键边界：缺 manifest 时 package_fingerprint 不变，validation_fingerprint 变', () => {
@@ -883,6 +883,7 @@ test('错误码常量与契约 §7 表格逐字一致', () => {
     'PACKAGE_EPISODE_INVALID',
     'PACKAGE_REFERENCE_UNKNOWN',
     'PACKAGE_HASH_MISMATCH',
+    'PACKAGE_SNAPSHOT_MISMATCH',
     'PACKAGE_TARGET_UNSUPPORTED',
     'IDEMPOTENCY_KEY_REUSED',
     'PACKAGE_CONFLICT',
