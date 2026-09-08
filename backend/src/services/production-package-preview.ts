@@ -106,34 +106,37 @@ function openZip(buffer: Buffer): Promise<ZipFile> {
 
 async function extractZip(buffer: Buffer): Promise<{ packageRoot: string; snapshotDirectory: string }> {
   if (buffer.length > PREVIEW_LIMITS.maxUploadBytes) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_LIMIT', 'ZIP 大小不能超过 25 MiB', 413)
-  const zip = await openZip(buffer).catch(error => {
-    if (error instanceof ProductionPackagePreviewError) throw error
-    throw archiveError('ZIP 损坏或无法读取')
-  })
   const snapshotId = crypto.randomUUID()
   const snapshotDirectory = path.join(snapshotRoot, snapshotId)
   const destination = path.join(snapshotDirectory, 'package')
-  fs.mkdirSync(destination, { recursive: true, mode: 0o700 })
-  // Keep the immutable upload alongside the extracted package for the future
-  // Confirm step's snapshot/fingerprint revalidation. It is never parsed or
-  // returned to the client.
-  fs.writeFileSync(path.join(snapshotDirectory, 'upload.zip'), buffer, { flag: 'wx', mode: 0o600 })
-  const seen = new Set<string>()
-  const lowerSeen = new Set<string>()
-  let fileCount = 0
-  let entryCount = 0
-  let expandedBytes = 0
+  let zip: ZipFile | undefined
   try {
+    zip = await openZip(buffer).catch(error => {
+      if (error instanceof ProductionPackagePreviewError) throw error
+      throw archiveError('ZIP 损坏或无法读取')
+    })
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 })
+    // Keep the immutable upload alongside the extracted package for the future
+    // Confirm step's snapshot/fingerprint revalidation. It is never parsed or
+    // returned to the client.
+    fs.writeFileSync(path.join(snapshotDirectory, 'upload.zip'), buffer, { flag: 'wx', mode: 0o600 })
+    const seen = new Set<string>()
+    const lowerSeen = new Set<string>()
+    let fileCount = 0
+    let entryCount = 0
+    let expandedBytes = 0
+    if (!zip) throw archiveError('ZIP 无法读取')
+    const archive = zip
     await new Promise<void>((resolve, reject) => {
       let settled = false
       const fail = (error: unknown) => { if (!settled) { settled = true; reject(error) } }
-      zip.on('error', fail)
-      zip.on('end', () => { if (!settled) { settled = true; resolve() } })
-      zip.on('entry', async (entry: Entry) => {
+      archive.on('error', fail)
+      archive.on('end', () => { if (!settled) { settled = true; resolve() } })
+      archive.on('entry', async (entry: Entry) => {
         if (settled) return
         try {
           const info = normalizeEntryName(entry.fileName)
-          if (!info.normalized) { zip.readEntry(); return }
+          if (!info.normalized) { archive.readEntry(); return }
           entryCount += 1
           if (entryCount > PREVIEW_LIMITS.maxFiles) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_LIMIT', '归档目录项数量超过 1,000')
           if (seen.has(info.normalized) || lowerSeen.has(info.normalized.toLowerCase())) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_PATH_INVALID', '归档包含重复路径')
@@ -146,7 +149,7 @@ async function extractZip(buffer: Buffer): Promise<{ packageRoot: string; snapsh
             if (entry.uncompressedSize > PREVIEW_LIMITS.maxFileBytes) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_LIMIT', '单文件解压大小超过 10 MiB')
             if (entry.compressedSize === 0 && entry.uncompressedSize > 0 || entry.compressedSize > 0 && entry.uncompressedSize / entry.compressedSize > PREVIEW_LIMITS.maxCompressionRatio) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_LIMIT', '归档压缩比超过限制')
             if (isNestedArchive(info.normalized)) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_NESTED', '不允许嵌套归档文件')
-            const content = await readEntry(zip, entry)
+            const content = await readEntry(archive, entry)
             expandedBytes += content.length
             if (expandedBytes > PREVIEW_LIMITS.maxExpandedBytes) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_LIMIT', '归档解压总大小超过 100 MiB')
             const target = path.resolve(destination, ...info.normalized.split('/'))
@@ -154,15 +157,16 @@ async function extractZip(buffer: Buffer): Promise<{ packageRoot: string; snapsh
             fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 })
             fs.writeFileSync(target, content, { flag: 'wx', mode: 0o600 })
           }
-          zip.readEntry()
+          archive.readEntry()
         } catch (error) { fail(error) }
       })
-      zip.readEntry()
+      archive.readEntry()
     })
-    zip.close()
+    archive.close()
+    zip = undefined
     return { packageRoot: locatePackageRoot(destination), snapshotDirectory }
   } catch (error) {
-    try { zip.close() } catch { /* already closed */ }
+    try { zip?.close() } catch { /* already closed */ }
     fs.rmSync(snapshotDirectory, { recursive: true, force: true })
     if (error instanceof ProductionPackagePreviewError) throw error
     throw archiveError('ZIP 解压失败')

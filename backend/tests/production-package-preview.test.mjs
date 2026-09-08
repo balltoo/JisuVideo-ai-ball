@@ -16,9 +16,11 @@ import {
   restoreProductionPackagePreviews,
   clearProductionPackagePreviews,
 } from '../src/services/production-package-preview.ts'
-import productionPackages from '../src/routes/productionPackages.ts'
+import productionPackages, { createProductionPackagesRouter } from '../src/routes/productionPackages.ts'
 
 const fixtureRoot = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
+let verifiedIdentity = { tenantId: 'tenant-a', userId: 'route-user' }
+const testProductionPackages = createProductionPackagesRouter(() => verifiedIdentity)
 
 afterEach(() => clearProductionPackagePreviews())
 
@@ -32,10 +34,39 @@ async function zipEntries(entries) {
     output.once('error', reject)
   })
   archive.outputStream.pipe(output)
-  for (const [name, content] of entries) archive.addBuffer(Buffer.from(content), name)
+  for (const [name, content, options] of entries) archive.addBuffer(Buffer.from(content), name, options)
   archive.end()
   await done
   return Buffer.concat(chunks)
+}
+
+async function zipAtExactSize(targetBytes) {
+  const baseEntries = fixtureEntries()
+  const base = await zipEntries(baseEntries)
+  const emptyPadding = await zipEntries([
+    ...baseEntries,
+    ['padding-1.bin', Buffer.alloc(0), { compress: false }],
+    ['padding-2.bin', Buffer.alloc(0), { compress: false }],
+    ['padding-3.bin', Buffer.alloc(0), { compress: false }],
+  ])
+  const paddingOverhead = emptyPadding.length - base.length
+  const totalPadding = targetBytes - base.length - paddingOverhead
+  assert.ok(totalPadding > 0)
+  const first = Math.floor(totalPadding / 3)
+  const second = Math.floor((totalPadding - first) / 2)
+  const sizes = [first, second, totalPadding - first - second]
+  const make = () => zipEntries([
+    ...baseEntries,
+    ...sizes.map((size, index) => [`padding-${index + 1}.bin`, Buffer.alloc(size, 0x41), { compress: false }]),
+  ])
+  let archive = await make()
+  const delta = targetBytes - archive.length
+  if (delta) {
+    sizes[2] += delta
+    archive = await make()
+  }
+  assert.equal(archive.length, targetBytes)
+  return archive
 }
 
 function fixtureEntries(prefix = '') {
@@ -113,6 +144,27 @@ test('快照元数据持久化原始 ZIP，启动扫描可恢复未过期 token'
   assert.deepEqual(getProductionPackagePreview(preview.preview_token, 'u'), preview)
 })
 
+test('写入原始 ZIP 失败时关闭处理并清理未完成快照目录', async () => {
+  const root = path.join(os.tmpdir(), 'jisu-production-package-previews')
+  fs.mkdirSync(root, { recursive: true })
+  const before = new Set(fs.readdirSync(root))
+  const archive = await zipEntries(fixtureEntries())
+  const originalWriteFileSync = fs.writeFileSync
+  fs.writeFileSync = function (target, ...args) {
+    if (String(target).endsWith(`${path.sep}upload.zip`)) throw new Error('simulated disk failure')
+    return originalWriteFileSync.call(this, target, ...args)
+  }
+  try {
+    await assert.rejects(
+      () => createProductionPackagePreview({ zip: archive, owner: 'u' }),
+      (error) => error instanceof ProductionPackagePreviewError && error.code === 'PACKAGE_ARCHIVE_INVALID',
+    )
+  } finally {
+    fs.writeFileSync = originalWriteFileSync
+  }
+  assert.deepEqual(new Set(fs.readdirSync(root)), before)
+})
+
 test('parser blocked 结果保留诊断但仍使用传输层快照 token', async () => {
   const entries = fixtureEntries()
   const index = entries.findIndex(([name]) => name === 'drama-package.md')
@@ -127,13 +179,14 @@ test('parser blocked 结果保留诊断但仍使用传输层快照 token', async
 test('Preview 路由只接受 ZIP multipart，并返回稳定传输层错误', async () => {
   const form = new FormData()
   form.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip', { type: 'application/zip' }))
-  const response = await productionPackages.request('/preview', { method: 'POST', body: form, headers: { 'x-user-id': 'route-user' } })
+  const response = await testProductionPackages.request('/preview', { method: 'POST', body: form, headers: { 'x-user-id': 'forged-user', 'x-tenant-id': 'forged-tenant' } })
   assert.equal(response.status, 200)
   const payload = await response.json()
   assert.equal(payload.code, 200)
   assert.match(payload.data.preview_token, /^[A-Za-z0-9_-]{32,}$/)
 
-  const tokenResponse = await productionPackages.request(`/preview/${payload.data.preview_token}`, { headers: { 'x-user-id': 'other-user' } })
+  verifiedIdentity = { tenantId: 'tenant-a', userId: 'other-user' }
+  const tokenResponse = await testProductionPackages.request(`/preview/${payload.data.preview_token}`, { headers: { 'x-user-id': 'route-user', 'x-tenant-id': 'tenant-a' } })
   assert.equal(tokenResponse.status, 404)
   assert.deepEqual(await tokenResponse.json(), {
     code: 'PACKAGE_PREVIEW_NOT_FOUND',
@@ -141,10 +194,53 @@ test('Preview 路由只接受 ZIP multipart，并返回稳定传输层错误', a
     message: '预览不存在',
   })
 
-  const invalidResponse = await productionPackages.request('/preview', {
+  verifiedIdentity = { tenantId: 'tenant-a', userId: 'route-user' }
+  const forgedIdentityResponse = await testProductionPackages.request(`/preview/${payload.data.preview_token}`, { headers: { 'x-user-id': 'other-user', 'x-tenant-id': 'other-tenant' } })
+  assert.equal(forgedIdentityResponse.status, 200)
+
+  const invalidResponse = await testProductionPackages.request('/preview', {
     method: 'POST',
     body: new FormData(),
   })
   assert.equal(invalidResponse.status, 400)
   assert.equal((await invalidResponse.json()).severity, 'error')
+
+  const unauthenticatedResponse = await productionPackages.request('/preview', { method: 'POST', body: form })
+  assert.equal(unauthenticatedResponse.status, 401)
+  assert.equal((await unauthenticatedResponse.json()).code, 'PACKAGE_PREVIEW_UNAUTHORIZED')
+})
+
+test('Preview 路由严格校验 multipart 结构，并按 ZIP 原始字节执行 25 MiB 边界', async () => {
+  const exactZip = await zipAtExactSize(PREVIEW_LIMITS.maxUploadBytes)
+  const exactForm = new FormData()
+  exactForm.set('file', new File([exactZip], 'exact.zip', { type: 'application/zip' }))
+  const exactResponse = await testProductionPackages.request('/preview', { method: 'POST', body: exactForm })
+  assert.equal(exactResponse.status, 200)
+
+  const oversizedZip = await zipAtExactSize(PREVIEW_LIMITS.maxUploadBytes + 1)
+  const oversizedForm = new FormData()
+  oversizedForm.set('file', new File([oversizedZip], 'oversized.zip', { type: 'application/zip' }))
+  const oversizedResponse = await testProductionPackages.request('/preview', { method: 'POST', body: oversizedForm })
+  assert.equal(oversizedResponse.status, 413)
+  assert.equal((await oversizedResponse.json()).code, 'PACKAGE_ARCHIVE_LIMIT')
+
+  const extraFieldForm = new FormData()
+  extraFieldForm.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip'))
+  extraFieldForm.set('unexpected', 'nope')
+  const extraFieldResponse = await testProductionPackages.request('/preview', { method: 'POST', body: extraFieldForm })
+  assert.equal(extraFieldResponse.status, 400)
+
+  const duplicateFileForm = new FormData()
+  const smallZip = new File([await zipEntries(fixtureEntries())], 'fixture.zip')
+  duplicateFileForm.append('file', smallZip)
+  duplicateFileForm.append('file', smallZip)
+  const duplicateFileResponse = await testProductionPackages.request('/preview', { method: 'POST', body: duplicateFileForm })
+  assert.equal(duplicateFileResponse.status, 400)
+
+  const nonMultipartResponse = await testProductionPackages.request('/preview', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: 'fixture.zip' }),
+  })
+  assert.equal(nonMultipartResponse.status, 400)
 })

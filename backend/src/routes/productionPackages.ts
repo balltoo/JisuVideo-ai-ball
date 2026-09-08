@@ -2,14 +2,31 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { success } from '../utils/response.js'
-import { createProductionPackagePreview, getProductionPackagePreview, ProductionPackagePreviewError } from '../services/production-package-preview.js'
+import { createProductionPackagePreview, getProductionPackagePreview, ProductionPackagePreviewError, PREVIEW_LIMITS } from '../services/production-package-preview.js'
 
-const app = new Hono()
+export type VerifiedPreviewIdentity = {
+  tenantId: string
+  userId: string
+}
 
-function ownerOf(c: Context): string {
-  const user = c.req.header('x-user-id')?.trim()
-  const tenant = c.req.header('x-tenant-id')?.trim()
-  return `${tenant || 'default'}:${user || 'anonymous'}`
+export type PreviewIdentityResolver = (c: Context) => VerifiedPreviewIdentity | null
+
+/**
+ * The application auth middleware must attach a verified identity to the
+ * request context. Client-controlled x-user-id/x-tenant-id headers are never
+ * consulted here. Until auth middleware is wired, the endpoint is denied.
+ */
+const identityFromAuthContext: PreviewIdentityResolver = (c) => {
+  const context = c as unknown as { get: (key: string) => unknown }
+  const value = context.get('verifiedPreviewIdentity')
+  if (!value || typeof value !== 'object') return null
+  const identity = value as Partial<VerifiedPreviewIdentity>
+  if (typeof identity.tenantId !== 'string' || !identity.tenantId.trim() || typeof identity.userId !== 'string' || !identity.userId.trim()) return null
+  return { tenantId: identity.tenantId.trim(), userId: identity.userId.trim() }
+}
+
+function ownerOf(identity: VerifiedPreviewIdentity): string {
+  return JSON.stringify([identity.tenantId, identity.userId])
 }
 
 function previewError(c: any, error: unknown) {
@@ -18,23 +35,42 @@ function previewError(c: any, error: unknown) {
   return c.json({ code: 'PACKAGE_ARCHIVE_INVALID', severity: 'error', message: '生产包无法处理，请重新导出后再试' }, 400)
 }
 
-app.use('/preview', bodyLimit({ maxSize: 25 * 1024 * 1024, onError: c => c.json({ code: 'PACKAGE_ARCHIVE_LIMIT', severity: 'error', message: 'ZIP 大小不能超过 25 MiB' }, 413) }))
+export function createProductionPackagesRouter(resolveIdentity: PreviewIdentityResolver = identityFromAuthContext) {
+  const app = new Hono()
+  // Leave a small envelope for multipart boundaries and headers while the
+  // ZIP itself remains capped by PREVIEW_LIMITS.maxUploadBytes below.
+  const maxRequestBytes = PREVIEW_LIMITS.maxUploadBytes + 1024 * 1024
+  app.use('/preview', bodyLimit({ maxSize: maxRequestBytes, onError: c => c.json({ code: 'PACKAGE_ARCHIVE_LIMIT', severity: 'error', message: '上传请求超过允许大小' }, 413) }))
 
-app.post('/preview', async (c) => {
-  try {
-    const body = await c.req.parseBody()
-    const file = body.file
-    if (!(file instanceof File)) return c.json({ code: 'PACKAGE_ARCHIVE_INVALID', severity: 'error', message: '请上传一个 ZIP 文件' }, 400)
-    if (!file.name.toLowerCase().endsWith('.zip')) return c.json({ code: 'PACKAGE_ARCHIVE_INVALID', severity: 'error', message: '仅支持 ZIP 文件' }, 400)
-    const bytes = Buffer.from(await file.arrayBuffer())
-    const preview = await createProductionPackagePreview({ zip: bytes, owner: ownerOf(c) })
-    return success(c, preview)
-  } catch (error) { return previewError(c, error) }
-})
+  app.post('/preview', async (c) => {
+    try {
+      const identity = resolveIdentity(c)
+      if (!identity) return c.json({ code: 'PACKAGE_PREVIEW_UNAUTHORIZED', severity: 'error', message: '需要已验证的登录身份' }, 401)
+      const contentType = c.req.header('content-type')?.toLowerCase() || ''
+      if (!contentType.startsWith('multipart/form-data;')) return c.json({ code: 'PACKAGE_ARCHIVE_INVALID', severity: 'error', message: '必须使用 multipart/form-data 上传 ZIP' }, 400)
+      const body = await c.req.parseBody({ all: true })
+      const keys = Object.keys(body)
+      if (keys.length !== 1 || keys[0] !== 'file') return c.json({ code: 'PACKAGE_ARCHIVE_INVALID', severity: 'error', message: '请求只能包含一个名为 file 的 ZIP 文件' }, 400)
+      const file = body.file
+      if (Array.isArray(file) || !(file instanceof File)) return c.json({ code: 'PACKAGE_ARCHIVE_INVALID', severity: 'error', message: '请上传一个 ZIP 文件' }, 400)
+      if (!file.name.toLowerCase().endsWith('.zip')) return c.json({ code: 'PACKAGE_ARCHIVE_INVALID', severity: 'error', message: '仅支持 ZIP 文件' }, 400)
+      if (file.size > PREVIEW_LIMITS.maxUploadBytes) return c.json({ code: 'PACKAGE_ARCHIVE_LIMIT', severity: 'error', message: 'ZIP 大小不能超过 25 MiB' }, 413)
+      const bytes = Buffer.from(await file.arrayBuffer())
+      if (bytes.length > PREVIEW_LIMITS.maxUploadBytes) return c.json({ code: 'PACKAGE_ARCHIVE_LIMIT', severity: 'error', message: 'ZIP 大小不能超过 25 MiB' }, 413)
+      const preview = await createProductionPackagePreview({ zip: bytes, owner: ownerOf(identity) })
+      return success(c, preview)
+    } catch (error) { return previewError(c, error) }
+  })
 
-app.get('/preview/:token', (c) => {
-  try { return success(c, getProductionPackagePreview(c.req.param('token'), ownerOf(c))) }
-  catch (error) { return previewError(c, error) }
-})
+  app.get('/preview/:token', (c) => {
+    try {
+      const identity = resolveIdentity(c)
+      if (!identity) return c.json({ code: 'PACKAGE_PREVIEW_UNAUTHORIZED', severity: 'error', message: '需要已验证的登录身份' }, 401)
+      return success(c, getProductionPackagePreview(c.req.param('token'), ownerOf(identity)))
+    } catch (error) { return previewError(c, error) }
+  })
 
-export default app
+  return app
+}
+
+export default createProductionPackagesRouter()
