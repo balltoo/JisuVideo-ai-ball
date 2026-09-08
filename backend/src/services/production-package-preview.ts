@@ -40,7 +40,9 @@ type Snapshot = {
   token: string
   snapshotId: string
   owner: string
+  createdAt: number
   uploadSha256: string
+  snapshotDirectory: string
   root: string
   packageFingerprint: string
   validationFingerprint: string
@@ -66,7 +68,7 @@ function normalizeEntryName(raw: string): { normalized: string; isDirectory: boo
   const segments = slashName.split('/').filter(Boolean)
   if (segments.some(segment => segment === '..')) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_PATH_INVALID', '归档不能包含路径穿越')
   const normalized = segments.filter(segment => segment !== '.').join('/')
-  if (!normalized) return { normalized: '', isDirectory: true }
+  if (!normalized) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_PATH_INVALID', '归档路径规范化后不能为空')
   if (segments.length > PREVIEW_LIMITS.maxPathDepth) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_LIMIT', '归档路径层级超过限制')
   return { normalized, isDirectory }
 }
@@ -102,15 +104,20 @@ function openZip(buffer: Buffer): Promise<ZipFile> {
   return new Promise((resolve, reject) => yauzl.fromBuffer(buffer, { lazyEntries: true, validateEntrySizes: true, strictFileNames: true }, (error, zip) => error || !zip ? reject(error || archiveError('ZIP 无法读取')) : resolve(zip)))
 }
 
-async function extractZip(buffer: Buffer): Promise<string> {
+async function extractZip(buffer: Buffer): Promise<{ packageRoot: string; snapshotDirectory: string }> {
   if (buffer.length > PREVIEW_LIMITS.maxUploadBytes) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_LIMIT', 'ZIP 大小不能超过 25 MiB', 413)
   const zip = await openZip(buffer).catch(error => {
     if (error instanceof ProductionPackagePreviewError) throw error
     throw archiveError('ZIP 损坏或无法读取')
   })
   const snapshotId = crypto.randomUUID()
-  const destination = path.join(snapshotRoot, snapshotId)
+  const snapshotDirectory = path.join(snapshotRoot, snapshotId)
+  const destination = path.join(snapshotDirectory, 'package')
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 })
+  // Keep the immutable upload alongside the extracted package for the future
+  // Confirm step's snapshot/fingerprint revalidation. It is never parsed or
+  // returned to the client.
+  fs.writeFileSync(path.join(snapshotDirectory, 'upload.zip'), buffer, { flag: 'wx', mode: 0o600 })
   const seen = new Set<string>()
   const lowerSeen = new Set<string>()
   let fileCount = 0
@@ -153,10 +160,10 @@ async function extractZip(buffer: Buffer): Promise<string> {
       zip.readEntry()
     })
     zip.close()
-    return locatePackageRoot(destination)
+    return { packageRoot: locatePackageRoot(destination), snapshotDirectory }
   } catch (error) {
     try { zip.close() } catch { /* already closed */ }
-    fs.rmSync(destination, { recursive: true, force: true })
+    fs.rmSync(snapshotDirectory, { recursive: true, force: true })
     if (error instanceof ProductionPackagePreviewError) throw error
     throw archiveError('ZIP 解压失败')
   }
@@ -179,16 +186,17 @@ function locatePackageRoot(destination: string): string {
 function snapshotToken(): string { return crypto.randomBytes(24).toString('base64url') }
 
 function persistSnapshot(snapshot: Snapshot): void {
-  const directory = path.dirname(snapshot.root)
-  fs.writeFileSync(path.join(directory, SNAPSHOT_METADATA), JSON.stringify({
+  fs.writeFileSync(path.join(snapshot.snapshotDirectory, SNAPSHOT_METADATA), JSON.stringify({
     token: snapshot.token,
     snapshotId: snapshot.snapshotId,
     owner: snapshot.owner,
+    createdAt: snapshot.createdAt,
     uploadSha256: snapshot.uploadSha256,
     packageFingerprint: snapshot.packageFingerprint,
     validationFingerprint: snapshot.validationFingerprint,
     expiresAt: snapshot.expiresAt,
-    rootRelative: path.relative(directory, snapshot.root),
+    uploadRelative: 'upload.zip',
+    rootRelative: path.relative(snapshot.snapshotDirectory, snapshot.root),
     preview: snapshot.preview,
   }), { encoding: 'utf8', mode: 0o600 })
 }
@@ -200,13 +208,14 @@ export function restoreProductionPackagePreviews(now = Date.now()): number {
     if (!entry.isDirectory()) continue
     const directory = path.join(snapshotRoot, entry.name)
     try {
-      const metadata = JSON.parse(fs.readFileSync(path.join(directory, SNAPSHOT_METADATA), 'utf8')) as Partial<Snapshot> & { rootRelative?: string }
-      if (typeof metadata.token !== 'string' || typeof metadata.owner !== 'string' || typeof metadata.expiresAt !== 'number' || metadata.expiresAt <= now || typeof metadata.rootRelative !== 'string') {
+      const metadata = JSON.parse(fs.readFileSync(path.join(directory, SNAPSHOT_METADATA), 'utf8')) as Partial<Snapshot> & { rootRelative?: string; uploadRelative?: string }
+      if (typeof metadata.token !== 'string' || typeof metadata.owner !== 'string' || typeof metadata.expiresAt !== 'number' || metadata.expiresAt <= now || typeof metadata.rootRelative !== 'string' || metadata.uploadRelative !== 'upload.zip') {
         fs.rmSync(directory, { recursive: true, force: true })
         continue
       }
       const root = path.resolve(directory, metadata.rootRelative)
-      if (!root.startsWith(`${directory}${path.sep}`) || !fs.statSync(root).isDirectory() || !metadata.preview) {
+      const upload = path.resolve(directory, metadata.uploadRelative)
+      if (!root.startsWith(`${directory}${path.sep}`) || !upload.startsWith(`${directory}${path.sep}`) || !fs.statSync(root).isDirectory() || !fs.statSync(upload).isFile() || !metadata.preview) {
         fs.rmSync(directory, { recursive: true, force: true })
         continue
       }
@@ -214,7 +223,9 @@ export function restoreProductionPackagePreviews(now = Date.now()): number {
         token: metadata.token,
         snapshotId: String(metadata.snapshotId || entry.name),
         owner: metadata.owner,
+        createdAt: typeof metadata.createdAt === 'number' ? metadata.createdAt : metadata.expiresAt - PREVIEW_LIMITS.ttlMs,
         uploadSha256: String(metadata.uploadSha256 || ''),
+        snapshotDirectory: directory,
         packageFingerprint: String(metadata.packageFingerprint || ''),
         validationFingerprint: String(metadata.validationFingerprint || ''),
         expiresAt: metadata.expiresAt,
@@ -231,19 +242,21 @@ export function restoreProductionPackagePreviews(now = Date.now()): number {
 
 export async function createProductionPackagePreview(input: { zip: Buffer; owner: string }): Promise<ProductionPackagePreview> {
   cleanupExpiredProductionPackagePreviews()
-  const packageRoot = await extractZip(input.zip)
+  const extracted = await extractZip(input.zip)
+  const { packageRoot, snapshotDirectory } = extracted
   try {
     const parsed = parseProductionPackage(packageRoot)
     const token = snapshotToken()
-    const snapshotId = path.basename(path.dirname(packageRoot))
-    const expiresAt = Date.now() + PREVIEW_LIMITS.ttlMs
+    const snapshotId = path.basename(snapshotDirectory)
+    const createdAt = Date.now()
+    const expiresAt = createdAt + PREVIEW_LIMITS.ttlMs
     const preview = { ...parsed, preview_token: token } as ProductionPackagePreview
-    const snapshot: Snapshot = { token, snapshotId, owner: input.owner, uploadSha256: crypto.createHash('sha256').update(input.zip).digest('hex'), root: packageRoot, packageFingerprint: parsed.package.package_fingerprint, validationFingerprint: parsed.package.validation_fingerprint, expiresAt, preview }
+    const snapshot: Snapshot = { token, snapshotId, owner: input.owner, createdAt, uploadSha256: crypto.createHash('sha256').update(input.zip).digest('hex'), snapshotDirectory, root: packageRoot, packageFingerprint: parsed.package.package_fingerprint, validationFingerprint: parsed.package.validation_fingerprint, expiresAt, preview }
     persistSnapshot(snapshot)
     snapshots.set(token, snapshot)
     return preview
   } catch (error) {
-    fs.rmSync(path.dirname(packageRoot), { recursive: true, force: true })
+    fs.rmSync(snapshotDirectory, { recursive: true, force: true })
     throw error
   }
 }
@@ -252,7 +265,7 @@ export function getProductionPackagePreview(token: string, owner: string): Produ
   const snapshot = snapshots.get(token)
   if (!snapshot) throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_NOT_FOUND', '预览已不存在或已被清理', 404)
   if (snapshot.expiresAt <= Date.now()) {
-    snapshots.delete(token); fs.rmSync(path.dirname(snapshot.root), { recursive: true, force: true })
+    snapshots.delete(token); fs.rmSync(snapshot.snapshotDirectory, { recursive: true, force: true })
     throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_EXPIRED', '预览已过期，请重新上传', 410)
   }
   if (snapshot.owner !== owner) throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_NOT_FOUND', '预览不存在', 404)
@@ -262,7 +275,7 @@ export function getProductionPackagePreview(token: string, owner: string): Produ
 export function cleanupExpiredProductionPackagePreviews(now = Date.now()): number {
   let removed = 0
   for (const [token, snapshot] of snapshots) if (snapshot.expiresAt <= now) {
-    snapshots.delete(token); fs.rmSync(path.dirname(snapshot.root), { recursive: true, force: true }); removed += 1
+    snapshots.delete(token); fs.rmSync(snapshot.snapshotDirectory, { recursive: true, force: true }); removed += 1
   }
   return removed
 }
@@ -294,6 +307,6 @@ export function startProductionPackagePreviewCleanup(intervalMs = 5 * 60 * 1000)
 }
 
 export function clearProductionPackagePreviews(): void {
-  for (const snapshot of snapshots.values()) fs.rmSync(path.dirname(snapshot.root), { recursive: true, force: true })
+  for (const snapshot of snapshots.values()) fs.rmSync(snapshot.snapshotDirectory, { recursive: true, force: true })
   snapshots.clear()
 }

@@ -117,5 +117,16 @@ test('Preview 路由只接受 ZIP multipart，并返回稳定传输层错误', a
 
   const tokenResponse = await productionPackages.request(`/preview/${payload.data.preview_token}`, { headers: { 'x-user-id': 'other-user' } })
   assert.equal(tokenResponse.status, 404)
-  assert.equal((await tokenResponse.json()).code, 'PACKAGE_PREVIEW_NOT_FOUND')
+  assert.deepEqual(await tokenResponse.json(), {
+    code: 'PACKAGE_PREVIEW_NOT_FOUND',
+    severity: 'error',
+    message: '预览不存在',
+  })
+
+  const invalidResponse = await productionPackages.request('/preview', {
+    method: 'POST',
+    body: new FormData(),
+  })
+  assert.equal(invalidResponse.status, 400)
+  assert.equal((await invalidResponse.json()).severity, 'error')
 })
