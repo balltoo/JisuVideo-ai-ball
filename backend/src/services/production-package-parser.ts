@@ -81,6 +81,23 @@ const KNOWN_FRONT_MATTER_FIELDS = new Set([
   'processing_steps', 'reviewer_note',
 ])
 
+function toJsonSafe(value: unknown, active = new WeakSet<object>()): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
+  if (value instanceof Date) return value.toISOString()
+  if (value instanceof Uint8Array) return Buffer.from(value).toString('base64')
+  if (typeof value !== 'object') throw new Error(`unsupported YAML value type: ${typeof value}`)
+  if (active.has(value)) throw new Error('cyclic YAML alias is not allowed')
+  active.add(value)
+  try {
+    if (Array.isArray(value)) return value.map(item => toJsonSafe(item, active))
+    const out: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = toJsonSafe(item, active)
+    return out
+  } finally {
+    active.delete(value)
+  }
+}
+
 function frontMatter(text: string, file: string, errors: Diagnostic[]) {
   const start = text.startsWith('---\n') ? 0 : -1
   if (start < 0) { errors.push({ severity: 'error', path: file, code: 'PACKAGE_FRONTMATTER_INVALID', message: 'front matter must start at byte offset 0' }); return { fields: {}, extensions: {}, body: text } }
@@ -96,7 +113,10 @@ function frontMatter(text: string, file: string, errors: Diagnostic[]) {
   const extensions: Record<string, unknown> = {}
   let parsed: unknown
   try {
-    parsed = yaml.load(head, { schema: yaml.JSON_SCHEMA })
+    // DEFAULT_SCHEMA is still the safe js-yaml schema, but unlike JSON_SCHEMA
+    // it accepts standard YAML collections such as !!set/!!omap. Convert the
+    // result immediately to JSON-safe values and reject cyclic aliases.
+    parsed = toJsonSafe(yaml.load(head, { schema: yaml.DEFAULT_SCHEMA }))
   } catch (error) {
     errors.push({ severity: 'error', path: file, code: 'PACKAGE_FRONTMATTER_INVALID', message: `invalid YAML front matter: ${error instanceof Error ? error.message : String(error)}` })
     return { fields, extensions, body }

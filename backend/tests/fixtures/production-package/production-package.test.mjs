@@ -403,6 +403,35 @@ test('YAML block scalar 可解析；未知列表字段进入 extensions 并产�
   assert.ok(parsedList.diagnostics.warnings.some(d => d.path === 'drama-package.md' && d.field === 'extensions'))
 })
 
+test('标准 YAML !!set 未知扩展可安全保留，循环 alias 返回结构化错误而不溢出', () => {
+  const setRoot = path.join(TMP, 'yaml-set-extension')
+  h.copyPackage(POSITIVE_ROOT, setRoot)
+  const setDrama = path.join(setRoot, 'drama-package.md')
+  fs.writeFileSync(setDrama, fs.readFileSync(setDrama, 'utf8').replace('genre: 悬疑', 'genre: 悬疑\ncustom_tags: !!set\n  noir: null\n  mystery: null'))
+  const setFingerprint = h.readPackage(setRoot).packageFingerprint
+  const setManifest = path.join(setRoot, 'source-manifest.md')
+  fs.writeFileSync(setManifest, fs.readFileSync(setManifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${setFingerprint}`))
+  const parsedSet = parseProductionPackage(setRoot)
+  assert.equal(parsedSet.status, 'ready')
+  assert.deepEqual(parsedSet.project.extensions.custom_tags, { noir: null, mystery: null })
+  assert.ok(parsedSet.diagnostics.warnings.some(d => d.path === 'drama-package.md' && d.field === 'extensions'))
+
+  const cycleRoot = path.join(TMP, 'yaml-cycle-alias')
+  h.copyPackage(POSITIVE_ROOT, cycleRoot)
+  const cycleDrama = path.join(cycleRoot, 'drama-package.md')
+  fs.writeFileSync(cycleDrama, fs.readFileSync(cycleDrama, 'utf8').replace('genre: 悬疑', 'custom: &loop\n  self: *loop\ngenre: 悬疑'))
+  const cycleFingerprint = h.readPackage(cycleRoot).packageFingerprint
+  const cycleManifest = path.join(cycleRoot, 'source-manifest.md')
+  fs.writeFileSync(cycleManifest, fs.readFileSync(cycleManifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${cycleFingerprint}`))
+  assert.doesNotThrow(() => parseProductionPackage(cycleRoot))
+  const parsedCycle = parseProductionPackage(cycleRoot)
+  const cycleDiagnostic = parsedDiagnostic(parsedCycle, CODE.FRONTMATTER_INVALID)
+  assert.equal(parsedCycle.status, 'blocked')
+  assert.equal(parsedCycle.can_confirm, false)
+  assert.equal(cycleDiagnostic.path, 'drama-package.md')
+  assert.match(cycleDiagnostic.message, /cyclic|alias/i)
+})
+
 test('所有暴露到 DTO 的 front matter 与 extensions 均拒绝本地路径和凭据', () => {
   const cases = [
     {
