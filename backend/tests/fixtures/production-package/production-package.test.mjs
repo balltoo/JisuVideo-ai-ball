@@ -308,6 +308,109 @@ for (const spec of NEGATIVES) {
   })
 }
 
+test('解析器负例语义：阻断项必须 blocked/不可确认，诊断字段完整且路径可定位', () => {
+  for (const spec of NEGATIVES.filter((n) => n.id.startsWith('B'))) {
+    const dest = path.join(TMP, `semantic-${spec.id.toLowerCase()}`)
+    h.copyPackage(POSITIVE_ROOT, dest)
+    h.applyMutation(dest, spec)
+    let parsed
+    if (spec.expect?.rejectsRead) {
+      // 编码错误仍应由解析器转成稳定的 error 诊断，而不是抛出未结构化异常。
+      parsed = parseProductionPackage(dest)
+      assert.equal(parsed.status, 'blocked', `[${spec.id}] 编码错误必须阻断`)
+      assert.equal(parsed.can_confirm, false, `[${spec.id}] 编码错误不可确认`)
+    } else {
+      parsed = parseProductionPackage(dest)
+      assert.equal(parsed.status, 'blocked', `[${spec.id}] 语义错误必须阻断`)
+      assert.equal(parsed.can_confirm, false, `[${spec.id}] 语义错误不可确认`)
+    }
+    const diagnostic = parsedDiagnostic(parsed, spec.code)
+    assert.equal(diagnostic.severity, 'error', `[${spec.id}] severity 必须为 error`)
+    assert.ok(typeof diagnostic.path === 'string' && diagnostic.path.length > 0, `[${spec.id}] path 必须可定位`)
+    assert.ok(typeof diagnostic.code === 'string' && diagnostic.code.length > 0, `[${spec.id}] code 必须稳定`)
+    assert.ok(typeof diagnostic.message === 'string' && diagnostic.message.length > 0, `[${spec.id}] message 必须非空`)
+  }
+})
+
+test('解析器警告语义：W1-W5 不阻断，未知字段进入 extensions', () => {
+  for (const spec of NEGATIVES.filter((n) => n.id.startsWith('W'))) {
+    const dest = path.join(TMP, `semantic-${spec.id.toLowerCase()}`)
+    h.copyPackage(POSITIVE_ROOT, dest)
+    h.applyMutation(dest, spec)
+    if (spec.id === 'W1' || spec.id === 'W2') {
+      for (const episode of ['episodes/001.md', 'episodes/002.md']) {
+        const episodePath = path.join(dest, episode)
+        let episodeText = fs.readFileSync(episodePath, 'utf8')
+        const heading = spec.id === 'W1' ? 'Character Refs' : 'Scene Refs'
+        episodeText = episodeText.replace(new RegExp(`(## ${heading}\\n)(?:- .*\\n)+`), '$1')
+        fs.writeFileSync(episodePath, episodeText)
+      }
+    }
+    const mutatedForManifest = h.readPackage(dest)
+    const manifestPath = path.join(dest, 'source-manifest.md')
+    const manifestText = fs.readFileSync(manifestPath, 'utf8')
+    fs.writeFileSync(manifestPath, manifestText.replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${mutatedForManifest.packageFingerprint}`))
+    const parsed = parseProductionPackage(dest)
+    assert.equal(parsed.status, 'ready', `[${spec.id}] warning-only 不得阻断`)
+    assert.equal(parsed.can_confirm, true, `[${spec.id}] warning-only 仍可确认`)
+    assert.ok(parsed.diagnostics.warnings.length > 0, `[${spec.id}] 必须有 warning`)
+    for (const diagnostic of parsed.diagnostics.warnings) {
+      assert.equal(diagnostic.severity, 'warning')
+      assert.ok(diagnostic.path.length > 0)
+      assert.ok(diagnostic.code.length > 0)
+      assert.ok(diagnostic.message.length > 0)
+    }
+    if (spec.id === 'W3') assert.equal(parsed.project.extensions.custom_director, '某位导演')
+  }
+})
+
+test('解析器严格校验 manifest、项目和剧集元数据边界', () => {
+  const cases = [
+    { id: 'manifest-source-kind', path: 'source-manifest.md', find: 'source_kind: external_episodic', replace: 'source_kind: short_text', code: CODE.MANIFEST_INVALID, field: 'source_kind' },
+    { id: 'manifest-human-reviewed', path: 'source-manifest.md', find: 'human_reviewed: true', replace: 'human_reviewed: false', code: CODE.MANIFEST_INVALID, field: 'human_reviewed' },
+    { id: 'manifest-processed-at', path: 'source-manifest.md', find: 'processed_at: "2026-09-07T20:00:00+08:00"', replace: 'processed_at: "2026-09-07"', code: CODE.MANIFEST_INVALID, field: 'processed_at' },
+    { id: 'manifest-fingerprint', path: 'source-manifest.md', find: 'package_fingerprint: "sha256:4f0a6bd0380164258303d49bc5d313f32357d1826e65f31fbb0da85f8b9ddb87"', replace: 'package_fingerprint: "sha256:4f0a6bd0380164258303d49bc5d313f32357d1826e65f31fbb0da85f8b9ddb88"', code: CODE.HASH_MISMATCH, field: 'package_fingerprint' },
+    { id: 'drama-zero-target', path: 'drama-package.md', find: 'target_episode_count: 2', replace: 'target_episode_count: 0', code: CODE.EPISODE_INVALID, field: 'target_episode_count' },
+    { id: 'drama-noninteger-version', path: 'drama-package.md', find: 'package_version: 1', replace: 'package_version: 1.5', code: CODE.FRONTMATTER_INVALID, field: 'package_version' },
+    { id: 'episode-empty-title', path: 'episodes/001.md', find: 'title: 夹层里的名片', replace: 'title: ""', code: CODE.EPISODE_INVALID, field: 'title' },
+    { id: 'episode-duplicate-id', path: 'episodes/002.md', find: 'episode_id: E002', replace: 'episode_id: E001', code: CODE.DUPLICATE_ID, field: 'episode_id' },
+  ]
+  for (const item of cases) {
+    const dest = path.join(TMP, `strict-${item.id}`)
+    h.copyPackage(POSITIVE_ROOT, dest)
+    const file = path.join(dest, item.path)
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(item.find, item.replace))
+    const parsed = parseProductionPackage(dest)
+    const diagnostic = parsedDiagnostic(parsed, item.code)
+    assert.equal(parsed.status, 'blocked', `[${item.id}] 必须阻断`)
+    assert.equal(parsed.can_confirm, false, `[${item.id}] 不可确认`)
+    assert.equal(diagnostic.path, item.path === 'episodes/002.md' && item.code === CODE.DUPLICATE_ID ? 'episodes/' : item.path)
+    assert.equal(diagnostic.field, item.field)
+  }
+})
+
+test('相同 episode title 合法，DTO 按文件和 external_id 稳定排序', () => {
+  const dest = path.join(TMP, 'same-title')
+  h.copyPackage(POSITIVE_ROOT, dest)
+  const second = path.join(dest, 'episodes/002.md')
+  fs.writeFileSync(second, fs.readFileSync(second, 'utf8').replace('title: 雨巷的登记册', 'title: 夹层里的名片'))
+  const packageFingerprint = h.readPackage(dest).packageFingerprint
+  const manifest = path.join(dest, 'source-manifest.md')
+  fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${packageFingerprint}`))
+  const parsed = parseProductionPackage(dest)
+  assert.equal(parsed.status, 'ready')
+  assert.deepEqual(parsed.episodes.map((episode) => episode.external_id), ['E001', 'E002'])
+  assert.deepEqual(parsed.characters.map((character) => character.external_id), ['C001', 'C002'])
+  assert.deepEqual(parsed.scenes.map((scene) => scene.external_id), ['S001', 'S002'])
+  assert.equal(parsed.episodes[0].content_char_count, EXPECTED.positive.episodes[0].contentChars - 1)
+})
+
+function parsedDiagnostic(parsed, code) {
+  const diagnostic = parsed.diagnostics.errors.find((item) => item.code === code)
+  assert.ok(diagnostic, `未找到诊断 ${code}`)
+  return diagnostic
+}
+
 test('C2 关键边界：只改 manifest 时 package_fingerprint 不变，validation_fingerprint 变', () => {
   const spec = NEGATIVES.find((n) => n.id === 'C2')
   const dest = path.join(TMP, 'c2')
