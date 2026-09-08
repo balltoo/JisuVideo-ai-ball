@@ -18,13 +18,14 @@ import {
   clearProductionPackagePreviews,
 } from '../src/services/production-package-preview.ts'
 import productionPackages, { createProductionPackagesRouter } from '../src/routes/productionPackages.ts'
-import { createPreviewSessionAuth, signPreviewSession } from '../src/middleware/preview-auth.ts'
+import { createPreviewSessionAuth, signPreviewIdentity, PREVIEW_AUTH_AUDIENCE, PREVIEW_AUTH_MAX_AGE_MS } from '../src/middleware/preview-auth.ts'
 
 const fixtureRoot = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
 let verifiedIdentity = { tenantId: 'tenant-a', userId: 'route-user' }
 const testProductionPackages = createProductionPackagesRouter(() => verifiedIdentity)
 const integrationApi = new Hono()
-integrationApi.use('/production-packages/*', createPreviewSessionAuth('integration-secret'))
+const integrationSecret = Buffer.alloc(32, 7).toString('base64url')
+integrationApi.use('/production-packages/*', createPreviewSessionAuth(integrationSecret))
 integrationApi.route('/production-packages', productionPackages)
 
 afterEach(() => clearProductionPackagePreviews())
@@ -250,19 +251,35 @@ test('Preview 路由严格校验 multipart 结构，并按 ZIP 原始字节执�
   assert.equal(nonMultipartResponse.status, 400)
 })
 
-test('主应用默认挂载路径使用已验证会话身份，且不同身份不能读取同一 token', async () => {
-  const session = signPreviewSession({ tenantId: 'tenant-integration', userId: 'user-a', exp: Date.now() + 60_000 }, 'integration-secret')
+test('主应用默认挂载路径使用上游签名身份，且不同身份不能读取同一 token', async () => {
+  const issuedAt = Date.now()
+  const expiresAt = issuedAt + 60_000
+  const identityHeaders = (tenantId, userId, issued = issuedAt, expires = expiresAt, secret = integrationSecret) => ({
+    'x-authenticated-tenant-id': tenantId,
+    'x-authenticated-user-id': userId,
+    'x-authenticated-issued-at': String(issued),
+    'x-authenticated-expires-at': String(expires),
+    'x-authenticated-audience': PREVIEW_AUTH_AUDIENCE,
+    'x-authenticated-signature': signPreviewIdentity({ tenantId, userId, issuedAt: issued, expiresAt: expires, audience: PREVIEW_AUTH_AUDIENCE }, secret),
+  })
   const form = new FormData()
   form.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip'))
-  const response = await integrationApi.request('/production-packages/preview', { method: 'POST', body: form, headers: { cookie: `jisu_session=${session}`, 'x-user-id': 'forged' } })
+  const response = await integrationApi.request('/production-packages/preview', { method: 'POST', body: form, headers: { ...identityHeaders('tenant-integration', 'user-a'), 'x-user-id': 'forged' } })
   assert.equal(response.status, 200)
   const token = (await response.json()).data.preview_token
 
-  const otherSession = signPreviewSession({ tenantId: 'tenant-integration', userId: 'user-b', exp: Date.now() + 60_000 }, 'integration-secret')
-  const forbidden = await integrationApi.request(`/production-packages/preview/${token}`, { headers: { cookie: `jisu_session=${otherSession}`, 'x-user-id': 'user-a' } })
+  const forbidden = await integrationApi.request(`/production-packages/preview/${token}`, { headers: { ...identityHeaders('tenant-integration', 'user-b'), 'x-user-id': 'user-a' } })
   assert.equal(forbidden.status, 404)
   assert.equal((await forbidden.json()).code, 'PACKAGE_PREVIEW_NOT_FOUND')
 
-  const own = await integrationApi.request(`/production-packages/preview/${token}`, { headers: { cookie: `jisu_session=${session}`, 'x-user-id': 'forged-other' } })
+  const own = await integrationApi.request(`/production-packages/preview/${token}`, { headers: { ...identityHeaders('tenant-integration', 'user-a'), 'x-user-id': 'forged-other' } })
   assert.equal(own.status, 200)
+
+  const infinity = await integrationApi.request('/production-packages/preview', { method: 'POST', body: form, headers: identityHeaders('tenant-integration', 'user-a', issuedAt, Infinity) })
+  assert.equal(infinity.status, 401)
+  const weakSecretApi = new Hono()
+  weakSecretApi.use('/production-packages/*', createPreviewSessionAuth('weak'))
+  weakSecretApi.route('/production-packages', productionPackages)
+  const weak = await weakSecretApi.request('/production-packages/preview', { method: 'POST', body: form, headers: identityHeaders('tenant-integration', 'user-a', issuedAt, expiresAt, 'weak') })
+  assert.equal(weak.status, 503)
 })

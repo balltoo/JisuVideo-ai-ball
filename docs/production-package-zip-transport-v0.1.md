@@ -85,10 +85,14 @@ ZIP 原始字节
 
 ### 4.1 上传阶段
 
-Preview API 只能运行在已接入服务端认证中间件的受控边界内：路由从请求上下文读取
-经过验证的用户/租户身份，客户端提交的 `x-user-id`、`x-tenant-id` 等 Header 不参与
-隔离判断。认证上下文缺失时返回 `PACKAGE_PREVIEW_UNAUTHORIZED`（HTTP 401），不得
-回退到匿名身份；测试或内部调用必须通过服务端身份解析器注入已验证身份。
+Preview API 只能运行在已接入服务端认证中间件的受控边界内：上游认证网关使用仅双方
+持有的 `PREVIEW_AUTH_PROXY_SECRET` 对身份断言签名，路由验证
+`x-authenticated-tenant-id`、`x-authenticated-user-id`、`x-authenticated-issued-at`、
+`x-authenticated-expires-at`、固定 audience 和签名后，才把身份写入请求上下文。客户端
+提交的 `x-user-id`、`x-tenant-id` 等 Header 不参与隔离判断。认证密钥缺失或强度不足时
+功能保持关闭并返回 `PACKAGE_PREVIEW_AUTH_UNAVAILABLE`（HTTP 503）；断言缺失、过期或
+签名不正确时返回 `PACKAGE_PREVIEW_UNAUTHORIZED`（HTTP 401）。测试或内部调用必须模拟
+上游签名断言，不得直接伪造上下文。
 
 1. 校验请求身份、内容类型和原始字节上限；
 2. 将原始 ZIP 写入服务端专用临时目录，文件名使用随机值；
