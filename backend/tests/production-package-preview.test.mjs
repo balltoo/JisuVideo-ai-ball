@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import yazl from 'yazl'
+import { Hono } from 'hono'
 
 import * as helpers from './fixtures/production-package/helpers.mjs'
 import {
@@ -17,10 +18,14 @@ import {
   clearProductionPackagePreviews,
 } from '../src/services/production-package-preview.ts'
 import productionPackages, { createProductionPackagesRouter } from '../src/routes/productionPackages.ts'
+import { createPreviewSessionAuth, signPreviewSession } from '../src/middleware/preview-auth.ts'
 
 const fixtureRoot = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
 let verifiedIdentity = { tenantId: 'tenant-a', userId: 'route-user' }
 const testProductionPackages = createProductionPackagesRouter(() => verifiedIdentity)
+const integrationApi = new Hono()
+integrationApi.use('/production-packages/*', createPreviewSessionAuth('integration-secret'))
+integrationApi.route('/production-packages', productionPackages)
 
 afterEach(() => clearProductionPackagePreviews())
 
@@ -243,4 +248,21 @@ test('Preview 路由严格校验 multipart 结构，并按 ZIP 原始字节执�
     body: JSON.stringify({ file: 'fixture.zip' }),
   })
   assert.equal(nonMultipartResponse.status, 400)
+})
+
+test('主应用默认挂载路径使用已验证会话身份，且不同身份不能读取同一 token', async () => {
+  const session = signPreviewSession({ tenantId: 'tenant-integration', userId: 'user-a', exp: Date.now() + 60_000 }, 'integration-secret')
+  const form = new FormData()
+  form.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip'))
+  const response = await integrationApi.request('/production-packages/preview', { method: 'POST', body: form, headers: { cookie: `jisu_session=${session}`, 'x-user-id': 'forged' } })
+  assert.equal(response.status, 200)
+  const token = (await response.json()).data.preview_token
+
+  const otherSession = signPreviewSession({ tenantId: 'tenant-integration', userId: 'user-b', exp: Date.now() + 60_000 }, 'integration-secret')
+  const forbidden = await integrationApi.request(`/production-packages/preview/${token}`, { headers: { cookie: `jisu_session=${otherSession}`, 'x-user-id': 'user-a' } })
+  assert.equal(forbidden.status, 404)
+  assert.equal((await forbidden.json()).code, 'PACKAGE_PREVIEW_NOT_FOUND')
+
+  const own = await integrationApi.request(`/production-packages/preview/${token}`, { headers: { cookie: `jisu_session=${session}`, 'x-user-id': 'forged-other' } })
+  assert.equal(own.status, 200)
 })

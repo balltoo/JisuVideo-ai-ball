@@ -142,6 +142,7 @@ Preview API 对外只返回上述快照 token，并覆盖 parser DTO 中原有�
 | `PACKAGE_ARCHIVE_ROOT_AMBIGUOUS` | 无法唯一定位生产包根 | 否 |
 | `PACKAGE_PREVIEW_NOT_FOUND` | token 对应快照不存在或已清理 | 否 |
 | `PACKAGE_PREVIEW_EXPIRED` | token 超过 TTL | 否 |
+| `PACKAGE_PREVIEW_UNAUTHORIZED` | 缺少或无法验证服务端会话身份 | 否 |
 | `PACKAGE_SNAPSHOT_MISMATCH` | Confirm 时当前快照/文件 hash 与预览不一致 | 否，先于幂等查询 |
 
 所有传输层错误必须返回稳定的 `code`、`severity=error` 和面向用户的 `message`。不得返回临时目录、服务器本地绝对路径、归档内部堆栈、密钥或用户隐私。

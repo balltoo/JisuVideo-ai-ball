@@ -27,6 +27,7 @@ import { requestLogger, errorHandler } from './middleware/logger.js'
 import { recoverInterruptedTasks } from './services/recovery.js'
 import { startStorageCleanup } from './utils/cleanup.js'
 import { startProductionPackagePreviewCleanup } from './services/production-package-preview.js'
+import { createPreviewSessionAuth } from './middleware/preview-auth.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -70,6 +71,9 @@ api.route('/merge', merge)
 api.route('/skills', skills)
 api.route('/props', props)
 api.route('/assets', assets)
+// Production-package previews require a server-verified signed session. The
+// router itself only consumes the identity placed in Hono context here.
+api.use('/production-packages/*', createPreviewSessionAuth())
 api.route('/production-packages', productionPackages)
 
 app.route('/api/v1', api)
