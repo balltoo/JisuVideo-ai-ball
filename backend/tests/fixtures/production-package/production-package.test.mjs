@@ -24,6 +24,7 @@ import { execFileSync } from 'node:child_process'
 
 import * as h from './helpers.mjs'
 import { MANIFEST_VERSION, CONTRACT_VERSION, CODE, EXPECTED, NEGATIVES, POSITIVE_ID } from './manifest.mjs'
+import { parseProductionPackage } from '../../../src/services/production-package-parser.ts'
 
 const POSITIVE_ROOT = path.join(h.PACKAGES_DIR, POSITIVE_ID)
 
@@ -246,10 +247,13 @@ for (const spec of NEGATIVES) {
 
     if (spec.expect.rejectsRead) {
       assert.throws(() => h.readPackage(dest), /PACKAGE_ENCODING_INVALID/)
+      const parsed = parseProductionPackage(dest)
+      assert.ok(parsed.diagnostics.errors.some(d => d.code === spec.code), `[${spec.id}] 解析器应返回 ${spec.code}`)
       return
     }
 
     const mutated = h.readPackage(dest)
+    const parsed = parseProductionPackage(dest)
     const expect = spec.expect
     assert.equal(
       mutated.packageFingerprint !== POSITIVE.packageFingerprint,
@@ -266,6 +270,19 @@ for (const spec of NEGATIVES) {
       expect.canonicalHashChanges,
       `canonical_hash 变化方向不符（${spec.contract}）`,
     )
+    const diagnosticCodes = [...parsed.diagnostics.errors, ...parsed.diagnostics.warnings].map(d => d.code).filter(Boolean)
+    if (spec.severity === 'error' && spec.code && spec.id.startsWith('B')) {
+      assert.ok(parsed.diagnostics.errors.some(d => d.code === spec.code), `[${spec.id}] 解析器应返回 ${spec.code}`)
+    }
+    if (spec.severity === 'warning') {
+      assert.equal(parsed.diagnostics.errors.length, 0, `[${spec.id}] 警告用例不得产生 error`)
+      if (spec.code) assert.ok(diagnosticCodes.includes(spec.code), `[${spec.id}] 解析器应返回 warning ${spec.code}`)
+      assert.ok(parsed.diagnostics.warnings.length > 0, `[${spec.id}] 解析器应产生 warning`)
+    }
+    if (spec.id === 'C3') {
+      const confirmPreview = parseProductionPackage(dest, { targetMode: 'update' })
+      assert.ok(confirmPreview.diagnostics.errors.some(d => d.code === CODE.TARGET_UNSUPPORTED), 'C3 必须阻断不支持的 target_mode')
+    }
   })
 }
 
@@ -380,6 +397,24 @@ test('正例真值登记了 DTO 可断言字段（解析器落地后即可用）
   assert.equal(g.targetEpisodeCount, g.episodeIds.length, 'target_episode_count 必须等于实际集数')
   assert.equal(g.characterIds.length, 2)
   assert.equal(g.sceneIds.length, 2)
+})
+
+test('只读解析器正例 DTO 与指纹真值一致', () => {
+  const dto = parseProductionPackage(POSITIVE_ROOT)
+  const g = EXPECTED.positive
+  assert.equal(dto.status, 'ready')
+  assert.equal(dto.can_confirm, true)
+  assert.equal(dto.package.package_id, g.packageId)
+  assert.equal(dto.project.title, g.title)
+  assert.equal(dto.project.target_episode_count, g.targetEpisodeCount)
+  assert.equal(dto.package.package_fingerprint, g.packageFingerprint)
+  assert.equal(dto.package.validation_fingerprint, g.validationFingerprint)
+  assert.equal(dto.package.source_version_canonical_hash, g.sourceVersionCanonicalHash)
+  assert.deepEqual(dto.characters.map(c => c.external_id), g.characterIds)
+  assert.deepEqual(dto.scenes.map(s => s.external_id), g.sceneIds)
+  assert.deepEqual(dto.episodes.map(e => e.external_id), g.episodeIds)
+  assert.deepEqual(dto.package.files.map(f => ({ path: f.path, fileHash: f.file_hash.replace(/^sha256:/, ''), byteLength: f.byte_length })), g.files)
+  assert.deepEqual(dto.diagnostics.errors, [])
 })
 
 test('契约版本与 manifest 版本已登记', () => {
