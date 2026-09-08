@@ -50,6 +50,7 @@ type Snapshot = {
 
 const snapshots = new Map<string, Snapshot>()
 const snapshotRoot = path.join(os.tmpdir(), 'jisu-production-package-previews')
+const SNAPSHOT_METADATA = 'snapshot.json'
 
 function archiveError(message: string, status = 400): ProductionPackagePreviewError {
   return new ProductionPackagePreviewError('PACKAGE_ARCHIVE_INVALID', message, status)
@@ -177,6 +178,57 @@ function locatePackageRoot(destination: string): string {
 
 function snapshotToken(): string { return crypto.randomBytes(24).toString('base64url') }
 
+function persistSnapshot(snapshot: Snapshot): void {
+  const directory = path.dirname(snapshot.root)
+  fs.writeFileSync(path.join(directory, SNAPSHOT_METADATA), JSON.stringify({
+    token: snapshot.token,
+    snapshotId: snapshot.snapshotId,
+    owner: snapshot.owner,
+    uploadSha256: snapshot.uploadSha256,
+    packageFingerprint: snapshot.packageFingerprint,
+    validationFingerprint: snapshot.validationFingerprint,
+    expiresAt: snapshot.expiresAt,
+    rootRelative: path.relative(directory, snapshot.root),
+    preview: snapshot.preview,
+  }), { encoding: 'utf8', mode: 0o600 })
+}
+
+export function restoreProductionPackagePreviews(now = Date.now()): number {
+  if (!fs.existsSync(snapshotRoot)) return 0
+  let restored = 0
+  for (const entry of fs.readdirSync(snapshotRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const directory = path.join(snapshotRoot, entry.name)
+    try {
+      const metadata = JSON.parse(fs.readFileSync(path.join(directory, SNAPSHOT_METADATA), 'utf8')) as Partial<Snapshot> & { rootRelative?: string }
+      if (typeof metadata.token !== 'string' || typeof metadata.owner !== 'string' || typeof metadata.expiresAt !== 'number' || metadata.expiresAt <= now || typeof metadata.rootRelative !== 'string') {
+        fs.rmSync(directory, { recursive: true, force: true })
+        continue
+      }
+      const root = path.resolve(directory, metadata.rootRelative)
+      if (!root.startsWith(`${directory}${path.sep}`) || !fs.statSync(root).isDirectory() || !metadata.preview) {
+        fs.rmSync(directory, { recursive: true, force: true })
+        continue
+      }
+      snapshots.set(metadata.token, {
+        token: metadata.token,
+        snapshotId: String(metadata.snapshotId || entry.name),
+        owner: metadata.owner,
+        uploadSha256: String(metadata.uploadSha256 || ''),
+        packageFingerprint: String(metadata.packageFingerprint || ''),
+        validationFingerprint: String(metadata.validationFingerprint || ''),
+        expiresAt: metadata.expiresAt,
+        root,
+        preview: metadata.preview,
+      })
+      restored += 1
+    } catch {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }
+  return restored
+}
+
 export async function createProductionPackagePreview(input: { zip: Buffer; owner: string }): Promise<ProductionPackagePreview> {
   cleanupExpiredProductionPackagePreviews()
   const packageRoot = await extractZip(input.zip)
@@ -186,7 +238,9 @@ export async function createProductionPackagePreview(input: { zip: Buffer; owner
     const snapshotId = path.basename(path.dirname(packageRoot))
     const expiresAt = Date.now() + PREVIEW_LIMITS.ttlMs
     const preview = { ...parsed, preview_token: token } as ProductionPackagePreview
-    snapshots.set(token, { token, snapshotId, owner: input.owner, uploadSha256: crypto.createHash('sha256').update(input.zip).digest('hex'), root: packageRoot, packageFingerprint: parsed.package.package_fingerprint, validationFingerprint: parsed.package.validation_fingerprint, expiresAt, preview })
+    const snapshot: Snapshot = { token, snapshotId, owner: input.owner, uploadSha256: crypto.createHash('sha256').update(input.zip).digest('hex'), root: packageRoot, packageFingerprint: parsed.package.package_fingerprint, validationFingerprint: parsed.package.validation_fingerprint, expiresAt, preview }
+    persistSnapshot(snapshot)
+    snapshots.set(token, snapshot)
     return preview
   } catch (error) {
     fs.rmSync(path.dirname(packageRoot), { recursive: true, force: true })
@@ -229,6 +283,7 @@ export function cleanupOrphanedProductionPackagePreviewDirectories(now = Date.no
 }
 
 export function startProductionPackagePreviewCleanup(intervalMs = 5 * 60 * 1000): NodeJS.Timeout {
+  restoreProductionPackagePreviews()
   cleanupOrphanedProductionPackagePreviewDirectories()
   const timer = setInterval(() => {
     cleanupExpiredProductionPackagePreviews()
