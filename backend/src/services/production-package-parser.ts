@@ -141,6 +141,9 @@ function bulletFields(text: string) {
 
 function entities(body: string, kind: 'character' | 'scene', file: string, extensions: Record<string, unknown>, errors: Diagnostic[]) {
   const out: Array<Record<string, unknown>> = []
+  const allowedFields = kind === 'character'
+    ? new Set(['name', 'role', 'description', 'appearance', 'personality', 'styling'])
+    : new Set(['location', 'time', 'prompt', 'lighting', 'description'])
   const re = new RegExp(`^##\\s+${kind}:\\s*([^\\n]+)\\n`, 'gm')
   const matches = [...body.matchAll(re)]
   const seen = new Set<string>()
@@ -152,20 +155,21 @@ function entities(body: string, kind: 'character' | 'scene', file: string, exten
     seen.add(id)
     if (kind === 'character' && !fields.name) errors.push({ severity: 'error', path: file, field: 'name', code: 'PACKAGE_FRONTMATTER_INVALID', message: `character ${id} requires name` })
     if (kind === 'scene' && (!fields.location || !fields.time)) errors.push({ severity: 'error', path: file, field: 'location/time', code: 'PACKAGE_FRONTMATTER_INVALID', message: `scene ${id} requires location and time` })
-    // Entity markdown is descriptive data only.  Media URLs, local filesystem
-    // paths and fields that look like deferred generation commands must be
-    // rejected explicitly so they are never silently dropped at import time.
-    // A plain `prompt` field remains valid descriptive prose in the v0.1
-    // sample; only generation-specific names are forbidden.
-    const forbiddenField = Object.keys(fields).find(field =>
-      field === 'image_url' || /(?:^|_)(?:final_)?(?:generation_?prompt|image_?prompt|video_?prompt|prompt_?to_?generate|instruction|generate_?command|generation_?instruction)$/i.test(field),
-    )
+    // Entity markdown is descriptive data only. Keep an explicit allowlist so
+    // fields such as image/video URLs, final_prompt and instructions cannot be
+    // silently discarded by the DTO projection. A plain scene `prompt` is a
+    // contract-approved descriptive field and remains valid.
+    const forbiddenField = Object.keys(fields).find(field => !allowedFields.has(field))
     const forbiddenValue = Object.entries(fields).find(([field, value]) => {
       if (typeof value !== 'string') return false
-      return /(?:^|[\\/])(?:[A-Za-z]:[\\/]|Users[\\/]|home[\\/]|var[\\/]|tmp[\\/])/.test(value) || /^\\\\/.test(value)
+      // YAML/Markdown values may quote a path and continue with descriptive
+      // prose. Strip only a leading quote before checking the path prefix so
+      // `"/opt/assets/x.png", ...` cannot bypass the absolute-path guard.
+      const candidate = value.trim().replace(/^['"]/, '')
+      return /^(?:[A-Za-z]:[\\/]|\\\\|\/|file:\/\/)/.test(candidate)
     })
-    if (forbiddenField) errors.push({ severity: 'error', path: file, field: forbiddenField, code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} contains forbidden executable or media field ${forbiddenField}` })
-    else if (forbiddenValue) errors.push({ severity: 'error', path: file, field: forbiddenValue[0], code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} contains a local absolute path` })
+    if (forbiddenField) errors.push({ severity: 'error', path: file, field: forbiddenField, code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} contains unsupported or forbidden field ${forbiddenField}` })
+    if (forbiddenValue) errors.push({ severity: 'error', path: file, field: forbiddenValue[0], code: 'PACKAGE_FRONTMATTER_INVALID', message: `${kind} contains a local absolute path` })
     out.push({ external_id: id, ...fields, extensions })
   })
   return out
@@ -208,7 +212,13 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
   const validationFp = displayHash(Buffer.from(rows.map(r => `${r.path}\0${r.fileHash}\n`).join('')))
   const episodeRows = rows.filter(r => EPISODE_RE.test(r.path)).sort((a, b) => a.path.localeCompare(b.path))
   const episodeNumbers = episodeRows.map(r => Number(EPISODE_RE.exec(r.path)![1]))
-  if (!episodeNumbers.length || episodeNumbers[0] !== 1 || episodeNumbers.some((n, i) => n !== i + 1)) conflicts.push({ severity: 'error', path: 'episodes/', field: 'episode_number', code: 'PACKAGE_EPISODE_INVALID', message: 'episode files must be numbered continuously from 001' })
+  if (!episodeNumbers.length || episodeNumbers[0] !== 1) {
+    // The first episode is a required package layout entry. A present 001
+    // followed by a gap is different: that is a semantic numbering conflict.
+    missing.push({ severity: 'error', path: 'episodes/001.md', code: 'PACKAGE_FILE_MISSING', message: 'required episode file missing: episodes/001.md' })
+  } else if (episodeNumbers.some((n, i) => n !== i + 1)) {
+    conflicts.push({ severity: 'error', path: 'episodes/', field: 'episode_number', code: 'PACKAGE_EPISODE_INVALID', message: 'episode files must be numbered continuously from 001' })
+  }
   const episodeData: Array<Record<string, unknown>> = []; const canonicalParts: Buffer[] = []
   for (const row of episodeRows) {
     const num = Number(EPISODE_RE.exec(row.path)![1]); const text = files.get(row.path)!.toString('utf8'); const fm = frontMatter(text, row.path, errors); extensionWarning(row.path, fm.extensions, warnings); const sec = sections(fm.body); const content = contentSection(fm.body)
@@ -231,7 +241,7 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
   if (drama.fields.schema !== 'jisu-production-package' || drama.fields.schema_version !== '0.1') errors.push({ severity: 'error', path: 'drama-package.md', code: 'PACKAGE_SCHEMA_UNSUPPORTED', message: 'unsupported drama package schema/version' })
   for (const key of ['package_id', 'title', 'package_version', 'target_episode_count']) if (drama.fields[key] === undefined) errors.push({ severity: 'error', path: 'drama-package.md', field: key, code: 'PACKAGE_MANIFEST_INVALID', message: `missing required field ${key}` })
   if (typeof drama.fields.package_id !== 'string' || !/^[a-z0-9][a-z0-9._-]{2,63}$/.test(drama.fields.package_id)) errors.push({ severity: 'error', path: 'drama-package.md', field: 'package_id', code: 'PACKAGE_FRONTMATTER_INVALID', message: 'package_id must match ^[a-z0-9][a-z0-9._-]{2,63}$' })
-  if (typeof drama.fields.title !== 'string' || drama.fields.title.length < 1 || drama.fields.title.length > 200) errors.push({ severity: 'error', path: 'drama-package.md', field: 'title', code: 'PACKAGE_FRONTMATTER_INVALID', message: 'title must be 1-200 characters' })
+  if (typeof drama.fields.title !== 'string' || drama.fields.title.trim().length < 1 || drama.fields.title.length > 200) errors.push({ severity: 'error', path: 'drama-package.md', field: 'title', code: 'PACKAGE_FRONTMATTER_INVALID', message: 'title must be 1-200 characters after trimming' })
   if (!Number.isInteger(drama.fields.package_version) || (drama.fields.package_version as number) < 1) errors.push({ severity: 'error', path: 'drama-package.md', field: 'package_version', code: 'PACKAGE_FRONTMATTER_INVALID', message: 'package_version must be a positive integer' })
   if (!Number.isInteger(drama.fields.target_episode_count) || (drama.fields.target_episode_count as number) < 1) errors.push({ severity: 'error', path: 'drama-package.md', field: 'target_episode_count', code: 'PACKAGE_EPISODE_INVALID', message: 'target_episode_count must be a positive integer' })
   if (Number(drama.fields.target_episode_count) !== episodeData.length) errors.push({ severity: 'error', path: 'drama-package.md', field: 'target_episode_count', code: 'PACKAGE_EPISODE_INVALID', message: 'target episode count does not match files' })
@@ -244,7 +254,9 @@ export function parseProductionPackage(packageRoot: string, options: { targetMod
   if (typeof manifest.fields.source_id !== 'string' || !manifest.fields.source_id.trim()) errors.push({ severity: 'error', path: MANIFEST, field: 'source_id', code: 'PACKAGE_MANIFEST_INVALID', message: 'source_id must be a non-empty string' })
   if (!['external_prepared', 'external_episodic'].includes(String(manifest.fields.source_kind))) errors.push({ severity: 'error', path: MANIFEST, field: 'source_kind', code: 'PACKAGE_MANIFEST_INVALID', message: 'source_kind enum invalid' })
   if (typeof manifest.fields.processor !== 'string' || !manifest.fields.processor.trim()) errors.push({ severity: 'error', path: MANIFEST, field: 'processor', code: 'PACKAGE_MANIFEST_INVALID', message: 'processor must be a non-empty string' })
-  if (typeof manifest.fields.processor === 'string' && /(?:sk-[A-Za-z0-9_-]{8,}|(?:api[_-]?key|token|secret)\s*[:=])/i.test(manifest.fields.processor)) errors.push({ severity: 'error', path: MANIFEST, field: 'processor', code: 'PACKAGE_MANIFEST_INVALID', message: 'processor must not contain credentials or secret material' })
+  const processor = manifest.fields.processor
+  const processorLooksLikeToolVersion = typeof processor === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\s+v?\d+(?:\.[A-Za-z0-9]+)*)$/.test(processor.trim())
+  if (typeof processor === 'string' && (!processorLooksLikeToolVersion || /(?:sk-[A-Za-z0-9_-]{4,}|(?:api[_-]?key|token|secret)\s*[:=]?\s*\S+|bearer\s+\S+)/i.test(processor))) errors.push({ severity: 'error', path: MANIFEST, field: 'processor', code: 'PACKAGE_MANIFEST_INVALID', message: 'processor must be a tool name plus version and must not contain credentials or secret material' })
   if (manifest.fields.human_reviewed !== true) errors.push({ severity: 'error', path: MANIFEST, field: 'human_reviewed', code: 'PACKAGE_MANIFEST_INVALID', message: 'human_reviewed must be true' })
   const iso8601 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/
   const processedAt = typeof manifest.fields.processed_at === 'string' ? iso8601.exec(manifest.fields.processed_at) : null

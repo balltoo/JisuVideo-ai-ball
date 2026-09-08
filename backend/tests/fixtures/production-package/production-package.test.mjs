@@ -1,9 +1,9 @@
 /**
  * Issue #96 — 生产包 v0.1 验收基线（fixture 自洽测试）
  *
- * 范围边界（重要）：本测试**不实现解析器**。契约 docs/production-package-import-v0.1.md
- * 冻结的是字段名、错误码与「哪些检查阻断、哪些只是警告」的语义；解析器、路由、schema
- * 与写入逻辑属于后续运行时 PR（#95 的 §5.2 幂等记录尚未授权迁移）。
+ * 范围边界（重要）：本测试只覆盖只读解析器与 fixture 验收，不实现路由、schema
+ * 或写入逻辑。契约 docs/production-package-import-v0.1.md 冻结的是字段名、错误码
+ * 与「哪些检查阻断、哪些只是警告」的语义；#95 的 §5.2 幂等记录尚未授权迁移。
  *
  * 因此本文件断言两类东西：
  *   A. **字节口径不变量**（现在就能断言）——契约 §3.2 的规范化、三类指纹、canonical
@@ -197,7 +197,7 @@ test('T02b 可选文件存在时，正例人物/场景引用完整', () => {
 
 // ─────────────────────────── A. 负例指纹不变量 ───────────────────────────
 
-test('负例矩阵完整性：11 条阻断 + 5 条警告 + 4 条 confirm 阶段', () => {
+test('负例矩阵完整性：12 条阻断 + 5 条警告 + 4 条 confirm 阶段', () => {
   const errors = NEGATIVES.filter((n) => n.severity === 'error')
   const warnings = NEGATIVES.filter((n) => n.severity === 'warning')
   // 按 ID 前缀分类：B = 解析阻断，W = 警告，C = confirm 阶段（哈希比对 + 冲突/幂等）。
@@ -206,16 +206,16 @@ test('负例矩阵完整性：11 条阻断 + 5 条警告 + 4 条 confirm 阶段'
   const confirm = errors.filter((n) => n.id.startsWith('C'))
 
   assert.equal(warnings.length, 5, `警告应为 5 条，实际 ${warnings.length}`)
-  assert.equal(blocking.length, 11, `阻断应为 11 条，实际 ${blocking.length}`)
+  assert.equal(blocking.length, 12, `阻断应为 12 条，实际 ${blocking.length}`)
   assert.equal(confirm.length, 4, `confirm 阶段应为 4 条（C1/C2 哈希 + C3/C4 冲突），实际 ${confirm.length}`)
-  assert.equal(NEGATIVES.length, 20, `矩阵总数应为 20，实际 ${NEGATIVES.length}`)
+  assert.equal(NEGATIVES.length, 21, `矩阵总数应为 21，实际 ${NEGATIVES.length}`)
 })
 
 test('Issue #96 交付 2 点名的 8 项负例逐条有覆盖', () => {
   // Issue #96「负例矩阵」原文逐项映射到矩阵 ID，防止后续删减时静默漏项。
   const COVERAGE = {
     '缺项目元信息': 'B1',
-    '剧集号重复/跳号': 'B4',
+    '剧集号重复/跳号': 'B12',
     '角色引用缺失': 'B7',
     '场景引用缺失': 'B9',
     '正文为空': 'B10',
@@ -406,11 +406,67 @@ test('解析器拒绝实体中的媒体地址、本地路径和待执行生成�
       field: 'description',
     },
     {
+      id: 'entity-posix-etc-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: /etc/passwd',
+      field: 'description',
+    },
+    {
+      id: 'entity-posix-private-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: /private/var/tmp/c001.png',
+      field: 'description',
+    },
+    {
+      id: 'entity-quoted-posix-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: "/opt/assets/c001.png"',
+      field: 'description',
+    },
+    {
+      id: 'entity-unc-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: \\\\server\\share\\c001.png',
+      field: 'description',
+    },
+    {
+      id: 'entity-extended-windows-path',
+      path: 'characters.md',
+      find: '- `description`: 二十四岁',
+      replace: '- `description`: \\\\?\\C:\\assets\\c001.png',
+      field: 'description',
+    },
+    {
       id: 'entity-generation-command',
       path: 'scenes.md',
       find: '- `location`: 旧物修复铺「渡灯」',
       replace: '- `location`: 旧物修复铺「渡灯」\n- `generation_prompt`: generate an image now',
       field: 'generation_prompt',
+    },
+    {
+      id: 'entity-final-prompt',
+      path: 'scenes.md',
+      find: '- `prompt`: 窄小的修灯铺，工作台上摊着拆开的黄铜风灯、灯芯、齿轮与镊子。',
+      replace: '- `prompt`: 窄小的修灯铺，工作台上摊着拆开的黄铜风灯、灯芯、齿轮与镊子。\n- `final_prompt`: render this scene now',
+      field: 'final_prompt',
+    },
+    {
+      id: 'entity-video-url',
+      path: 'scenes.md',
+      find: '- `prompt`: 窄小的修灯铺，工作台上摊着拆开的黄铜风灯、灯芯、齿轮与镊子。',
+      replace: '- `prompt`: 窄小的修灯铺，工作台上摊着拆开的黄铜风灯、灯芯、齿轮与镊子。\n- `video_url`: https://example.invalid/s001.mp4',
+      field: 'video_url',
+    },
+    {
+      id: 'entity-instructions',
+      path: 'scenes.md',
+      find: '- `prompt`: 窄小的修灯铺，工作台上摊着拆开的黄铜风灯、灯芯、齿轮与镊子。',
+      replace: '- `prompt`: 窄小的修灯铺，工作台上摊着拆开的黄铜风灯、灯芯、齿轮与镊子。\n- `instructions`: generate a video',
+      field: 'instructions',
     },
   ]
   for (const item of cases) {
@@ -429,6 +485,22 @@ test('解析器拒绝实体中的媒体地址、本地路径和待执行生成�
     assert.equal(diagnostic.field, item.field)
     assert.match(diagnostic.message, /forbidden|local absolute/i)
   }
+})
+
+test('项目标题 trim 后不得为空', () => {
+  const dest = path.join(TMP, 'blank-title')
+  h.copyPackage(POSITIVE_ROOT, dest)
+  const file = path.join(dest, 'drama-package.md')
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('title: 灯下旧物', 'title: "   "'))
+  const packageFingerprint = h.readPackage(dest).packageFingerprint
+  const manifest = path.join(dest, 'source-manifest.md')
+  fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${packageFingerprint}`))
+  const parsed = parseProductionPackage(dest)
+  const diagnostic = parsedDiagnostic(parsed, CODE.FRONTMATTER_INVALID)
+  assert.equal(parsed.status, 'blocked')
+  assert.equal(parsed.can_confirm, false)
+  assert.equal(diagnostic.path, 'drama-package.md')
+  assert.equal(diagnostic.field, 'title')
 })
 
 test('角色和场景 external_id 必须是非空 ASCII 标识符', () => {
@@ -453,17 +525,26 @@ test('角色和场景 external_id 必须是非空 ASCII 标识符', () => {
 })
 
 test('manifest processor 不得携带疑似密钥材料', () => {
-  const dest = path.join(TMP, 'processor-secret')
-  h.copyPackage(POSITIVE_ROOT, dest)
-  const manifest = path.join(dest, 'source-manifest.md')
-  fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace('processor: "hand-authored-fixture 1.0"', 'processor: "tool sk-xxxxxxxxxxxxxxxx"'))
-  const packageFingerprint = h.readPackage(dest).packageFingerprint
-  fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${packageFingerprint}`))
-  const parsed = parseProductionPackage(dest)
-  const diagnostic = parsedDiagnostic(parsed, CODE.MANIFEST_INVALID)
-  assert.equal(parsed.status, 'blocked')
-  assert.equal(diagnostic.path, 'source-manifest.md')
-  assert.equal(diagnostic.field, 'processor')
+  const values = [
+    ['processor-secret', 'tool sk-xxxxxxxxxxxxxxxx'],
+    ['processor-loose-credential-label', 'tool api_key real-secret-value'],
+    ['processor-bearer', 'tool bearer real-token-value'],
+    ['processor-token', 'tool token=real-token-value'],
+  ]
+  for (const [id, value] of values) {
+    const dest = path.join(TMP, id)
+    h.copyPackage(POSITIVE_ROOT, dest)
+    const manifest = path.join(dest, 'source-manifest.md')
+    fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace('processor: "hand-authored-fixture 1.0"', `processor: "${value}"`))
+    const packageFingerprint = h.readPackage(dest).packageFingerprint
+    fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8').replace(/^package_fingerprint:.*$/m, `package_fingerprint: ${packageFingerprint}`))
+    const parsed = parseProductionPackage(dest)
+    const diagnostic = parsedDiagnostic(parsed, CODE.MANIFEST_INVALID)
+    assert.equal(parsed.status, 'blocked', `[${id}]`)
+    assert.equal(parsed.can_confirm, false, `[${id}]`)
+    assert.equal(diagnostic.path, 'source-manifest.md', `[${id}]`)
+    assert.equal(diagnostic.field, 'processor', `[${id}]`)
+  }
 })
 
 test('相同 episode title 合法，DTO 按文件和 external_id 稳定排序', () => {

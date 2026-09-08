@@ -201,6 +201,7 @@ function walkRelPaths(root) {
  *   binary        —— 前置 BOM 字节（用于 B5 编码阻断）
  *   utf16le       —— 将完整文本写成无 BOM 的 UTF-16LE（用于 B11 编码阻断）
  *   duplicate-id  —— 把某个区块标题改成已存在的 external_id
+ *   rename        —— 更改剧集文件名，用于覆盖集号跳号语义
  *   insert-after  —— 在锚点后插入一行（未知 front matter 字段）
  *   replace-section —— 从锚点标题到文件末尾整体替换
  *   add-file      —— 新增契约未定义路径的文件
@@ -239,6 +240,14 @@ export function applyMutation(destRoot, spec) {
         path.join(destRoot, spec.target),
         (s) => s.replace(spec.anchor, spec.replacement),
       )
+      return
+    case 'rename':
+      {
+        const from = path.join(destRoot, spec.target)
+        const to = path.join(destRoot, spec.renameTo)
+        fs.mkdirSync(path.dirname(to), { recursive: true })
+        fs.renameSync(from, to)
+      }
       return
     case 'insert-after':
       modifyText(

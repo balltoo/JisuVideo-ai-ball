@@ -85,14 +85,14 @@ export const EXPECTED = {
 }
 
 /**
- * 负例矩阵：11 条阻断 + 5 条警告 + 4 条 confirm 阶段（哈希比对 2 + 冲突/幂等 2）。
+ * 负例矩阵：12 条阻断 + 5 条警告 + 4 条 confirm 阶段（哈希比对 2 + 冲突/幂等 2）。
  *
  * 每例给出**变异操作**与**该变异后的可复算真值**。真值存在的意义是：
  * 断言不能只看「返回失败」，必须验证**哪一段指纹变了、哪一段不变**。
  * 后者才是本契约最容易被实现错的边界——见 B3/T07b 的 package 不变而 validation 变化。
  */
 export const NEGATIVES = [
-  // ─────────────────────────── 8 条阻断 ───────────────────────────
+  // ─────────────────────────── 12 条阻断 ──────────────────────────
   {
     id: 'B1',
     severity: 'error',
@@ -129,11 +129,11 @@ export const NEGATIVES = [
   {
     id: 'B4',
     severity: 'error',
-    code: CODE.EPISODE_INVALID,
+    code: CODE.FILE_MISSING,
     contract: 'T03 / §3.1',
     mutate: 'delete',
     target: 'episodes/001.md',
-    expected: 'episodes/ 不再包含从 001 开始的连续集号',
+    expected: 'episodes/001.md 是必填布局文件，删除后必须报告 PACKAGE_FILE_MISSING',
     expect: { packageFingerprintChanges: true, validationFingerprintChanges: true, canonicalHashChanges: true },
   },
   {
@@ -222,6 +222,17 @@ export const NEGATIVES = [
     expected: '无 BOM 的 UTF-16LE 仍必须按非 UTF-8/二进制内容拒绝',
     expect: { rejectsRead: true },
     note: 'TextDecoder 的 fatal UTF-8 解码会接受包含 NUL 的 UTF-16LE 字节；实现必须先拒绝 NUL/binary 内容。',
+  },
+  {
+    id: 'B12',
+    severity: 'error',
+    code: CODE.EPISODE_INVALID,
+    contract: 'T04 / §3.1',
+    mutate: 'rename',
+    target: 'episodes/002.md',
+    renameTo: 'episodes/003.md',
+    expected: '001.md 存在但后续剧集跳号，属于剧集编号语义错误而不是布局文件缺失',
+    expect: { packageFingerprintChanges: true, validationFingerprintChanges: true, canonicalHashChanges: false },
   },
 
   // ─────────────────────────── 5 条警告 ───────────────────────────
