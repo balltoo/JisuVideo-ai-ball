@@ -28,6 +28,7 @@ import { recoverInterruptedTasks } from './services/recovery.js'
 import { startStorageCleanup } from './utils/cleanup.js'
 import { startProductionPackagePreviewCleanup } from './services/production-package-preview.js'
 import { createPreviewSessionAuth } from './middleware/preview-auth.js'
+import { previewRequestBodyLimit } from './middleware/preview-request-body.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -74,6 +75,9 @@ export function createApi(previewAuthSecret = process.env.PREVIEW_AUTH_PROXY_SEC
   api.route('/skills', skills)
   api.route('/props', props)
   api.route('/assets', assets)
+  // This stream guard must run before auth: unauthenticated chunked uploads
+  // must be bounded and hashed before any identity verification.
+  api.use('/production-packages/*', previewRequestBodyLimit())
   // Production-package previews require a server-verified signed session. The
   // router itself only consumes the identity placed in Hono context here.
   api.use('/production-packages/*', createPreviewSessionAuth(previewAuthSecret))

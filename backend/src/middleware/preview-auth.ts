@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import type { MiddlewareHandler } from 'hono'
 import type { VerifiedPreviewIdentity } from '../routes/productionPackages.js'
+import { PREVIEW_BODY_HASH_CONTEXT_KEY } from './preview-request-body.js'
 
 const AUTHENTICATED_TENANT = 'x-authenticated-tenant-id'
 const AUTHENTICATED_USER = 'x-authenticated-user-id'
@@ -67,13 +68,6 @@ function finiteNumber(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-async function requestBodySha256(c: Parameters<MiddlewareHandler>[0]): Promise<string | null> {
-  try {
-    const body = await c.req.raw.clone().arrayBuffer()
-    return crypto.createHash('sha256').update(Buffer.from(body)).digest('hex')
-  } catch { return null }
-}
-
 async function verifyTrustedIdentity(c: Parameters<MiddlewareHandler>[0], secret: Buffer, now = Date.now()): Promise<VerifiedPreviewIdentity | null> {
   const tenantId = header(c, AUTHENTICATED_TENANT)
   const userId = header(c, AUTHENTICATED_USER)
@@ -94,7 +88,9 @@ async function verifyTrustedIdentity(c: Parameters<MiddlewareHandler>[0], secret
   const nonceBytes = canonicalBase64Url(nonce)
   if (!nonceBytes || nonceBytes.length < NONCE_MIN_BYTES || nonceBytes.length > NONCE_MAX_BYTES) return null
   if (issuedAt > now + CLOCK_SKEW_MS || expiresAt <= now || expiresAt > now + PREVIEW_AUTH_MAX_AGE_MS || now - issuedAt > PREVIEW_AUTH_MAX_AGE_MS + CLOCK_SKEW_MS || expiresAt <= issuedAt) return null
-  const actualBodySha256 = await requestBodySha256(c)
+  const context = c as unknown as { get: (key: string) => unknown }
+  const actualBodySha256 = context.get(PREVIEW_BODY_HASH_CONTEXT_KEY)
+  if (typeof actualBodySha256 !== 'string') return null
   if (actualBodySha256 !== bodySha256) return null
   const canonical = `${audience}\n${tenantId}\n${userId}\n${issuedAt}\n${expiresAt}\n${method}\n${requestPath}\n${bodySha256}\n${nonce}`
   const expected = crypto.createHmac('sha256', secret).update(canonical).digest()

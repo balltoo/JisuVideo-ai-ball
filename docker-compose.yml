@@ -20,6 +20,9 @@ services:
 
   huobao-drama:
     build: .
+    # Preview nonce 防重放按单后端实例部署；多副本必须改为共享 nonce 存储方案
+    deploy:
+      replicas: 1
     ports:
       - "127.0.0.1:5679:5679"
     volumes:

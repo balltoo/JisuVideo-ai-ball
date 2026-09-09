@@ -20,12 +20,14 @@ import {
 } from '../src/services/production-package-preview.ts'
 import productionPackages, { createProductionPackagesRouter } from '../src/routes/productionPackages.ts'
 import { createPreviewSessionAuth, signPreviewIdentity, PREVIEW_AUTH_AUDIENCE, PREVIEW_AUTH_MAX_AGE_MS } from '../src/middleware/preview-auth.ts'
+import { previewRequestBodyLimit } from '../src/middleware/preview-request-body.ts'
 
 const fixtureRoot = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
 let verifiedIdentity = { tenantId: 'tenant-a', userId: 'route-user' }
 const testProductionPackages = createProductionPackagesRouter(() => verifiedIdentity)
 const integrationApi = new Hono()
 const integrationSecret = Buffer.alloc(32, 7).toString('base64url')
+integrationApi.use('/production-packages/*', previewRequestBodyLimit())
 integrationApi.use('/production-packages/*', createPreviewSessionAuth(integrationSecret))
 integrationApi.route('/production-packages', productionPackages)
 
@@ -358,6 +360,7 @@ test('认证密钥只接受规范且至少 32 字节的 Base64URL', async () => 
   ]
   for (const secret of malformedSecrets) {
     const api = new Hono()
+    api.use('/production-packages/*', previewRequestBodyLimit())
     api.use('/production-packages/*', createPreviewSessionAuth(secret))
     api.route('/production-packages', productionPackages)
     const response = await signedRequest(api, '/production-packages/preview', { body: form, secret })
@@ -366,6 +369,7 @@ test('认证密钥只接受规范且至少 32 字节的 Base64URL', async () => 
   }
 
   const validApi = new Hono()
+  validApi.use('/production-packages/*', previewRequestBodyLimit())
   validApi.use('/production-packages/*', createPreviewSessionAuth(integrationSecret))
   validApi.route('/production-packages', productionPackages)
   const valid = await signedRequest(validApi, '/production-packages/preview', { body: form })
@@ -395,6 +399,51 @@ test('请求绑定阻止跨路径、跨方法、篡改 body 和 nonce 重放', a
   assert.equal((await integrationApi.fetch(wrongBodyHash)).status, 401)
 })
 
+test('实际 API 在认证前流式拒绝无签名的超限 chunked 请求', async () => {
+  process.env.NODE_ENV = 'test'
+  process.env.MYSQL_NO_INIT = '1'
+  process.env.PREVIEW_AUTH_PROXY_SECRET = integrationSecret
+  const { createApi } = await import('../src/index.ts')
+  const maxRequestBytes = PREVIEW_LIMITS.maxUploadBytes + 1024 * 1024
+  let sent = 0
+  const body = new ReadableStream({
+    pull(controller) {
+      if (sent > maxRequestBytes) {
+        controller.close()
+        return
+      }
+      const size = Math.min(1024 * 1024, maxRequestBytes + 1 - sent)
+      sent += size
+      controller.enqueue(new Uint8Array(size))
+    },
+  })
+  const request = new Request('http://localhost/production-packages/preview', {
+    method: 'POST',
+    body,
+    duplex: 'half',
+    headers: { 'content-type': 'multipart/form-data; boundary=chunked-test' },
+  })
+  const response = await createApi(integrationSecret).fetch(request)
+  assert.equal(response.status, 413)
+  assert.equal((await response.json()).code, 'PACKAGE_ARCHIVE_LIMIT')
+})
+
+test('同一 nonce 在两个 API 实例中只能消费一次', async () => {
+  const form = new FormData()
+  form.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip'))
+  const apiA = new Hono()
+  apiA.use('/production-packages/*', previewRequestBodyLimit())
+  apiA.use('/production-packages/*', createPreviewSessionAuth(integrationSecret))
+  apiA.route('/production-packages', productionPackages)
+  const apiB = new Hono()
+  apiB.use('/production-packages/*', previewRequestBodyLimit())
+  apiB.use('/production-packages/*', createPreviewSessionAuth(integrationSecret))
+  apiB.route('/production-packages', productionPackages)
+  const request = await createSignedRequest('/production-packages/preview', { body: form })
+  assert.equal((await apiA.fetch(request.clone())).status, 200)
+  assert.equal((await apiB.fetch(request)).status, 401)
+})
+
 test('生产 Compose 注入密钥且实际 API 装配在缺密钥时关闭、有效断言时可用', async () => {
   process.env.NODE_ENV = 'test'
   process.env.MYSQL_NO_INIT = '1'
@@ -402,6 +451,9 @@ test('生产 Compose 注入密钥且实际 API 装配在缺密钥时关闭、有
   const { app, createApi } = await import('../src/index.ts')
   const compose = fs.readFileSync(path.join(path.dirname(fixtureRoot), '..', '..', '..', '..', '..', 'docker-compose.yml'), 'utf8')
   assert.match(compose, /PREVIEW_AUTH_PROXY_SECRET=\$\{PREVIEW_AUTH_PROXY_SECRET:\?\S[\s\S]*secret manager\}/)
+  assert.match(compose, /deploy:\s+replicas:\s+1/)
+  const transportContract = fs.readFileSync(path.join(path.dirname(fixtureRoot), '..', '..', '..', '..', '..', 'docs', 'production-package-zip-transport-v0.1.md'), 'utf8')
+  assert.match(transportContract, /SET preview-auth:nonce:<nonce> 1 NX PX/)
 
   const form = new FormData()
   form.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip'))

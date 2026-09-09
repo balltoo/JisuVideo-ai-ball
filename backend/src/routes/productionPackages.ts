@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { success } from '../utils/response.js'
 import { createProductionPackagePreview, getProductionPackagePreview, ProductionPackagePreviewError, PREVIEW_LIMITS } from '../services/production-package-preview.js'
+import { MAX_PREVIEW_REQUEST_BYTES } from '../middleware/preview-request-body.js'
 
 export type VerifiedPreviewIdentity = {
   tenantId: string
@@ -37,10 +38,7 @@ function previewError(c: any, error: unknown) {
 
 export function createProductionPackagesRouter(resolveIdentity: PreviewIdentityResolver = identityFromAuthContext) {
   const app = new Hono()
-  // Leave a small envelope for multipart boundaries and headers while the
-  // ZIP itself remains capped by PREVIEW_LIMITS.maxUploadBytes below.
-  const maxRequestBytes = PREVIEW_LIMITS.maxUploadBytes + 1024 * 1024
-  app.use('/preview', bodyLimit({ maxSize: maxRequestBytes, onError: c => c.json({ code: 'PACKAGE_ARCHIVE_LIMIT', severity: 'error', message: '上传请求超过允许大小' }, 413) }))
+  app.use('/preview', bodyLimit({ maxSize: MAX_PREVIEW_REQUEST_BYTES, onError: c => c.json({ code: 'PACKAGE_ARCHIVE_LIMIT', severity: 'error', message: '上传请求超过允许大小' }, 413) }))
 
   app.post('/preview', async (c) => {
     try {
