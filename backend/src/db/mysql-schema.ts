@@ -344,8 +344,8 @@ export const mysqlSchemaStatements = [
     owner VARCHAR(512) NOT NULL,
     created_at BIGINT NOT NULL,
     upload_sha256 CHAR(64) NOT NULL,
-    package_fingerprint CHAR(64) NOT NULL,
-    validation_fingerprint CHAR(64) NOT NULL,
+    package_fingerprint VARCHAR(128) NOT NULL,
+    validation_fingerprint VARCHAR(128) NOT NULL,
     expires_at BIGINT NOT NULL,
     root_relative VARCHAR(512) NOT NULL,
     preview_json LONGTEXT NOT NULL,
@@ -375,6 +375,10 @@ export async function initMySqlSchema(pool: Pool) {
   for (const statement of mysqlSchemaStatements) {
     await pool.query(statement)
   }
+  // Parser fingerprints are externally represented as `sha256:<hex>`, not
+  // bare 64-character digests.  MODIFY also upgrades a database created by
+  // an early preview build that used CHAR(64).
+  await pool.query('ALTER TABLE preview_package_snapshots MODIFY COLUMN package_fingerprint VARCHAR(128) NOT NULL, MODIFY COLUMN validation_fingerprint VARCHAR(128) NOT NULL')
   // ── v0.4 原文版本表（S1-1 / Issue #71，契约 §6.1 / §6.3）────────────────────
   // 字段类型一律以契约 §6.1 字段表为准：LONGTEXT 而非 TEXT、VARCHAR(64) 而非 CHAR(64)/TIMESTAMP、
   // INT 而非 BIGINT、diff/stats 用 LONGTEXT/TEXT 而非 MySQL JSON 列（对齐 plan_json 的既有写法）。
