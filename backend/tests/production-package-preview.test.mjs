@@ -23,6 +23,7 @@ import productionPackages, { createProductionPackagesRouter } from '../src/route
 import { createPreviewSessionAuth, signPreviewIdentity, PREVIEW_AUTH_AUDIENCE, PREVIEW_AUTH_MAX_AGE_MS } from '../src/middleware/preview-auth.ts'
 import { previewRequestBodyLimit } from '../src/middleware/preview-request-body.ts'
 import { consumePreviewNonce, previewNonceStorePath } from '../src/middleware/preview-nonce-store.ts'
+import { requestLogger } from '../src/middleware/logger.ts'
 
 const fixtureRoot = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
 let verifiedIdentity = { tenantId: 'tenant-a', userId: 'route-user' }
@@ -32,6 +33,29 @@ const integrationSecret = Buffer.alloc(32, 7).toString('base64url')
 integrationApi.use('/production-packages/*', previewRequestBodyLimit())
 integrationApi.use('/production-packages/*', createPreviewSessionAuth(integrationSecret))
 integrationApi.route('/production-packages', productionPackages)
+
+test('全局日志不会在预览限额前 clone 非 multipart 请求体', async () => {
+  const api = new Hono()
+  api.use('*', requestLogger)
+  api.post('/api/v1/production-packages/preview', c => c.text('ok'))
+  const originalClone = Request.prototype.clone
+  let cloneCalls = 0
+  Request.prototype.clone = function () {
+    cloneCalls += 1
+    return originalClone.call(this)
+  }
+  try {
+    const response = await api.fetch(new Request('http://localhost/api/v1/production-packages/preview', {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: 'chunked-looking body',
+    }))
+    assert.equal(response.status, 200)
+    assert.equal(cloneCalls, 0)
+  } finally {
+    Request.prototype.clone = originalClone
+  }
+})
 
 afterEach(() => clearProductionPackagePreviews())
 
