@@ -110,12 +110,13 @@ SHA-256，再生成断言；后端会对收到的原始请求体重新计算并�
 
 请求体大小保护在认证之前执行：主应用对 Preview 路径先以 26 MiB（25 MiB ZIP 加 1 MiB
 multipart 边界余量）流式限流，认证层只在该受限流上计算 SHA-256，不调用无界的
-`arrayBuffer()`。当前 Compose 通过 `deploy.replicas: 1` 明确按单后端实例运行；不得使用
-`--scale huobao-drama` 扩容。
+`arrayBuffer()`。同一入口还设置最多 8 个并发请求和 208 MiB 总 spool 预算；达到预算时
+直接返回 `429 PACKAGE_PREVIEW_BUSY`，不会创建临时文件。当前 Compose 通过
+`deploy.replicas: 1` 明确按单后端实例运行；不得使用 `--scale huobao-drama` 扩容。
 
 为覆盖重启和多副本场景，受信网关还必须使用持久化、原子的一次性 nonce 存储，在转发前
 执行等价于 Redis `SET preview-auth:nonce:<nonce> 1 NX PX <断言剩余毫秒数>` 的操作；只有
-`NX` 成功才转发请求。后端进程内 nonce 缓存是第二道防线，不能替代网关持久化去重。若未来
+`NX` 成功才转发请求。后端 data volume 上的原子 nonce 文件是第二道防线，不能替代网关持久化去重。若未来
 改为多后端副本，必须把该原子去重迁移到共享服务并在部署验收中验证跨副本重放被拒绝。
 
 生产 Compose 闭环：`docker-compose.yml` 中的后端服务使用必填插值

@@ -36,6 +36,12 @@ services:
       - DATABASE_URL=mysql://huobao:huobao@mysql:3306/huobao_drama
       # 由部署平台/secret manager 注入，不能提交到仓库；网关签名端必须使用同一值
       - PREVIEW_AUTH_PROXY_SECRET=${PREVIEW_AUTH_PROXY_SECRET:?Set PREVIEW_AUTH_PROXY_SECRET via the deployment secret manager}
+      # 预览请求资源预算：最多 8 个并发 spool，总临时容量 208 MiB
+      - PREVIEW_REQUEST_MAX_CONCURRENT=8
+      - PREVIEW_REQUEST_MAX_SPOOL_BYTES=218103808
+      # nonce 持久化在 data volume，跨重启保持；多主机扩容需改用 Redis SET NX PX
+      - PREVIEW_AUTH_NONCE_STORE_PATH=/app/data/preview-nonces
+      - PREVIEW_AUTH_NONCE_MAX_ENTRIES=100000
       # 浏览器来源白名单（逗号分隔）；默认 localhost:3013,localhost:5679
       # - CORS_ORIGIN=http://localhost:3013,http://localhost:5679
       # 参考媒体 dataURL 内联兜底提示（参考视频/音频走公网地址需配置）

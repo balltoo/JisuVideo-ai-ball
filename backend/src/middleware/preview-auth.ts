@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import type { MiddlewareHandler } from 'hono'
 import type { VerifiedPreviewIdentity } from '../routes/productionPackages.js'
 import { PREVIEW_BODY_HASH_CONTEXT_KEY } from './preview-request-body.js'
+import { consumePreviewNonce } from './preview-nonce-store.js'
 
 const AUTHENTICATED_TENANT = 'x-authenticated-tenant-id'
 const AUTHENTICATED_USER = 'x-authenticated-user-id'
@@ -21,8 +22,6 @@ const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/
 const NONCE_MIN_BYTES = 16
 const NONCE_MAX_BYTES = 64
-const NONCE_TTL_MS = PREVIEW_AUTH_MAX_AGE_MS + CLOCK_SKEW_MS
-const consumedNonces = new Map<string, number>()
 const PREVIEW_PATH_PATTERN = /^\/(?:api\/v1\/)?production-packages\/preview(?:\/[A-Za-z0-9_-]+)?$/
 
 export type TrustedPreviewIdentity = VerifiedPreviewIdentity & {
@@ -98,9 +97,7 @@ async function verifyTrustedIdentity(c: Parameters<MiddlewareHandler>[0], secret
   if (!supplied) return null
   if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return null
   const nonceKey = `${tenantId}\n${userId}\n${nonce}`
-  for (const [key, expires] of consumedNonces) if (expires <= now) consumedNonces.delete(key)
-  if (consumedNonces.has(nonceKey)) return null
-  consumedNonces.set(nonceKey, Math.min(expiresAt, now + NONCE_TTL_MS))
+  if (!(await consumePreviewNonce(nonceKey, expiresAt))) return null
   return { tenantId, userId }
 }
 
