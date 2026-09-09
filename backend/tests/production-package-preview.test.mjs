@@ -550,7 +550,7 @@ test('独立 Node 进程并发预留请求资源不得突破总预算', async ()
   const previousMaxConcurrent = process.env.PREVIEW_REQUEST_MAX_CONCURRENT
   const previousMaxBytes = process.env.PREVIEW_REQUEST_MAX_SPOOL_BYTES
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-resource-process-'))
-  const script = "import { reservePreviewRequestSlot } from './src/middleware/preview-request-body.ts'; try { const release = await reservePreviewRequestSlot(); process.stdout.write('1'); await new Promise(resolve => setTimeout(resolve, 100)); await release() } catch (error) { if (error?.code === 'PREVIEW_REQUEST_BUSY') process.stdout.write('0'); else throw error }"
+  const script = "import { reservePreviewRequestSlot } from './src/middleware/preview-request-body.ts'; try { const release = await reservePreviewRequestSlot(); process.stdout.write('1'); await new Promise(resolve => setTimeout(resolve, 3000)); await release() } catch (error) { if (error?.code === 'PREVIEW_REQUEST_BUSY') process.stdout.write('0'); else throw error }"
   const env = { PREVIEW_REQUEST_RESERVATION_PATH: root, PREVIEW_REQUEST_MAX_CONCURRENT: '1', PREVIEW_REQUEST_MAX_SPOOL_BYTES: String(26 * 1024 * 1024) }
   try {
     const results = await Promise.all(Array.from({ length: 8 }, () => runNodeWorker(script, env)))
