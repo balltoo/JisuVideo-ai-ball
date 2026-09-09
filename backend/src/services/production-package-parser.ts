@@ -249,6 +249,20 @@ function contentSection(body: string) {
   return (next ? rest.slice(0, next.index) : rest).replace(/\n+$/, '')
 }
 
+/** Canonical source text used by the preview fingerprint and source_versions. */
+export function canonicalSourceFromPackage(packageRoot: string): string {
+  const files = new Map<string, Buffer>()
+  for (const rel of walk(packageRoot)) files.set(rel, normalize(fs.readFileSync(path.join(packageRoot, rel))) )
+  const episodeRows = [...files.keys()].filter(rel => EPISODE_RE.test(rel)).sort((a, b) => a.localeCompare(b))
+  const parts: Buffer[] = []
+  for (const rel of episodeRows) {
+    const fm = frontMatter(files.get(rel)!.toString('utf8'), rel, [])
+    parts.push(Buffer.from(`${contentSection(fm.body)}\n`, 'utf8'))
+    if (rel !== episodeRows.at(-1)) parts.push(Buffer.from('\n'))
+  }
+  return Buffer.concat(parts).toString('utf8')
+}
+
 export function parseProductionPackage(packageRoot: string, options: { targetMode?: string } = {}): ProductionPackagePreview {
   const errors: Diagnostic[] = []; const warnings: Diagnostic[] = []; const missing: Diagnostic[] = []; const conflicts: Diagnostic[] = []
   if (options.targetMode && options.targetMode !== 'new_project') errors.push({ severity: 'error', path: '.', code: 'PACKAGE_TARGET_UNSUPPORTED', message: 'v0.1 only supports new_project target' })

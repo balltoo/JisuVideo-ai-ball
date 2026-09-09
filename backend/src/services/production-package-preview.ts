@@ -50,7 +50,14 @@ type Snapshot = {
   preview: ProductionPackagePreview
 }
 
-export type ConfirmSnapshot = Snapshot & { uploadPath: string }
+export type ConfirmSnapshot = Snapshot & { uploadPath: string; uploadBytes: Buffer }
+
+export async function extractProductionPackageUploadForConfirm(buffer: Buffer): Promise<{ preview: ProductionPackagePreview; packageRoot: string; cleanup: () => void }> {
+  const extracted = await extractZip(buffer)
+  try {
+    return { preview: parseProductionPackage(extracted.packageRoot), packageRoot: extracted.packageRoot, cleanup: () => fs.rmSync(extracted.snapshotDirectory, { recursive: true, force: true }) }
+  } catch (error) { fs.rmSync(extracted.snapshotDirectory, { recursive: true, force: true }); throw error }
+}
 
 const snapshots = new Map<string, Snapshot>()
 const SNAPSHOT_METADATA = 'snapshot.json'
@@ -321,9 +328,10 @@ export async function getProductionPackageSnapshotForConfirm(token: string, owne
   if (!uploadPath.startsWith(`${path.resolve(snapshot.snapshotDirectory)}${path.sep}`) || !fs.existsSync(uploadPath)) {
     throw new ProductionPackagePreviewError('PACKAGE_SNAPSHOT_MISMATCH', '预览文件已不存在，请重新上传', 409)
   }
-  const digest = crypto.createHash('sha256').update(fs.readFileSync(uploadPath)).digest('hex')
+  const uploadBytes = fs.readFileSync(uploadPath)
+  const digest = crypto.createHash('sha256').update(uploadBytes).digest('hex')
   if (digest !== snapshot.uploadSha256) throw new ProductionPackagePreviewError('PACKAGE_SNAPSHOT_MISMATCH', '预览文件已被替换，请重新上传', 409)
-  return { ...snapshot, uploadPath }
+  return { ...snapshot, uploadPath, uploadBytes }
 }
 
 async function removeSnapshot(snapshot: Snapshot): Promise<void> {

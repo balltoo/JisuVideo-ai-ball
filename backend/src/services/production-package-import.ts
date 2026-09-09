@@ -2,8 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import type { Pool, PoolConnection } from 'mysql2/promise'
-import { parseProductionPackage, type ProductionPackagePreview } from './production-package-parser.js'
-import { getProductionPackageSnapshotForConfirm, type ConfirmSnapshot, ProductionPackagePreviewError } from './production-package-preview.js'
+import { canonicalSourceFromPackage, type ProductionPackagePreview } from './production-package-parser.js'
+import { extractProductionPackageUploadForConfirm, getProductionPackageSnapshotForConfirm, type ConfirmSnapshot } from './production-package-preview.js'
 
 export type ConfirmImportInput = {
   token: string
@@ -51,15 +51,14 @@ async function writeImport(connection: PoolConnection, snapshot: ConfirmSnapshot
     [text(project.title) || '未命名项目', text(project.bible_summary), text(project.genre), text(project.style) || '3d', text(project.aspect_ratio) || '16:9', parsed.episodes.length, json({ production_package: { package_id: parsed.package.package_id, package_version: parsed.package.package_version, import_id: importId, source: parsed.source } }), createdAt, createdAt],
   )
   const dramaId = insertId(dramaResult)
+  const canonical = canonicalSourceFromPackage(snapshot.root)
   const episodeContents = new Map<number, string>()
-  const canonical = parsed.episodes.map(ep => {
+  for (const ep of parsed.episodes) {
     const episodeNumber = String(Number((ep as any).episode_number)).padStart(3, '0')
     const file = fs.readFileSync(path.join(snapshot.root, 'episodes', `${episodeNumber}.md`), 'utf8')
     const match = /^## Content\s*$([\s\S]*?)(?=^##\s+|$)/m.exec(file)
-    const content = (match?.[1] || '').trimEnd()
-    episodeContents.set(Number((ep as any).episode_number), content)
-    return content
-  }).filter(Boolean).join('\n\n')
+    episodeContents.set(Number((ep as any).episode_number), (match?.[1] || '').trimEnd())
+  }
   const sourceHash = crypto.createHash('sha256').update(canonical).digest('hex')
   const sourceResult = await connection.execute(
     `INSERT INTO source_versions (drama_id, base_kind, content, content_hash, base_hash, parent_version_id, diff, stats, created_at, updated_at)
@@ -109,32 +108,53 @@ export async function confirmProductionPackageImport(input: ConfirmImportInput) 
   const prior = await existingImport(pool, input.owner, input.idempotencyKey, input.packageFingerprint, input.validationFingerprint)
   if (prior) return prior
   const snapshot = await getProductionPackageSnapshotForConfirm(input.token, input.owner, { packageFingerprint: input.packageFingerprint, validationFingerprint: input.validationFingerprint })
-  const bytes = fs.readFileSync(snapshot.uploadPath)
-  const connection = await pool.getConnection()
+  const bytes = snapshot.uploadBytes
   let importId = 0
+  let ownsReservation = false
+  let reservationCommitted = false
+  const reservation = await pool.getConnection()
   try {
-    await connection.beginTransaction()
-    const [insertResult] = await connection.execute(
+    await reservation.beginTransaction()
+    const [insertResult] = await reservation.execute(
       `INSERT INTO production_package_imports (idempotency_owner, idempotency_key, preview_token, package_fingerprint, validation_fingerprint, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'processing', ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
       [input.owner, input.idempotencyKey, input.token, input.packageFingerprint, input.validationFingerprint, ts(), ts()],
     )
-    const [rows] = await connection.query<any[]>('SELECT * FROM production_package_imports WHERE id = LAST_INSERT_ID() FOR UPDATE')
+    const [rows] = await reservation.query<any[]>('SELECT * FROM production_package_imports WHERE id = LAST_INSERT_ID() FOR UPDATE')
     const row = rows[0]
+    if (!row) throw new ProductionPackageImportError('PACKAGE_IMPORT_FAILED', '无法创建导入幂等记录', 500)
     importId = Number(row.id)
     const insertedHere = Number((insertResult as any)?.affectedRows) === 1
-    if (!insertedHere && row.status === 'processing') throw new ProductionPackageImportError('PACKAGE_IMPORT_IN_PROGRESS', '该导入正在处理中，请稍后重试', 409)
-    if (row.status === 'completed') { await connection.commit(); return { status: 'completed', drama_id: Number(row.drama_id), import_id: importId, replayed: true } }
-    if (row.status === 'failed') { await connection.commit(); return { status: 'failed', import_id: importId, error: row.error_json ? JSON.parse(String(row.error_json)) : null, replayed: true } }
-    const parsed = parseProductionPackage(snapshot.root)
-    if (!parsed.can_confirm || parsed.package.package_fingerprint !== input.packageFingerprint || parsed.package.validation_fingerprint !== input.validationFingerprint) throw new ProductionPackageImportError('PACKAGE_SNAPSHOT_MISMATCH', '生产包重新校验未通过，请重新预览', 409, parsed.diagnostics)
-    const dramaId = await writeImport(connection, snapshot, parsed, importId)
-    await connection.execute('UPDATE production_package_imports SET status = \'completed\', drama_id = ?, updated_at = ? WHERE id = ?', [dramaId, ts(), importId])
-    await connection.commit()
-    return { status: 'completed', drama_id: dramaId, import_id: importId, replayed: false }
+    if (String(row.package_fingerprint) !== input.packageFingerprint || String(row.validation_fingerprint) !== input.validationFingerprint) {
+      await reservation.commit()
+      reservationCommitted = true
+      throw new ProductionPackageImportError('PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT', '同一个幂等 key 不能用于另一份生产包', 409)
+    }
+    ownsReservation = insertedHere
+    if (!insertedHere && row.status === 'processing') { await reservation.commit(); throw new ProductionPackageImportError('PACKAGE_IMPORT_IN_PROGRESS', '该导入正在处理中，请稍后重试', 409) }
+    if (row.status === 'completed') { await reservation.commit(); return { status: 'completed', drama_id: Number(row.drama_id), import_id: importId, replayed: true } }
+    if (row.status === 'failed') { await reservation.commit(); return { status: 'failed', import_id: importId, error: row.error_json ? JSON.parse(String(row.error_json)) : null, replayed: true } }
+    await reservation.commit()
+    reservationCommitted = true
+    const reparsed = await extractProductionPackageUploadForConfirm(bytes)
+    try {
+      const parsed = reparsed.preview
+      if (!parsed.can_confirm || parsed.package.package_fingerprint !== input.packageFingerprint || parsed.package.validation_fingerprint !== input.validationFingerprint) throw new ProductionPackageImportError('PACKAGE_SNAPSHOT_MISMATCH', '生产包重新校验未通过，请重新预览', 409, parsed.diagnostics)
+      const connection = await pool.getConnection()
+      try {
+        await connection.beginTransaction()
+        const dramaId = await writeImport(connection, { ...snapshot, root: reparsed.packageRoot }, parsed, importId)
+        await connection.execute('UPDATE production_package_imports SET status = \'completed\', drama_id = ?, updated_at = ? WHERE id = ?', [dramaId, ts(), importId])
+        await connection.commit()
+        return { status: 'completed', drama_id: dramaId, import_id: importId, replayed: false }
+      } catch (error) {
+        await connection.rollback().catch(() => {})
+        throw error
+      } finally { connection.release() }
+    } finally { reparsed.cleanup() }
   } catch (error) {
-    await connection.rollback().catch(() => {})
+    await reservation.rollback().catch(() => {})
     const diagnostic = { code: error instanceof ProductionPackageImportError ? error.code : 'PACKAGE_IMPORT_FAILED', message: error instanceof Error ? error.message : '导入失败' }
-    if (importId) await pool.query('UPDATE production_package_imports SET status = \'failed\', error_json = ?, updated_at = ? WHERE id = ?', [json(diagnostic), ts(), importId]).catch(() => {})
+    if (importId && ownsReservation && reservationCommitted) await pool.query('UPDATE production_package_imports SET status = \'failed\', error_json = ?, updated_at = ? WHERE id = ?', [json(diagnostic), ts(), importId]).catch(() => {})
     throw error instanceof ProductionPackageImportError ? error : new ProductionPackageImportError('PACKAGE_IMPORT_FAILED', '导入失败，请稍后重试', 500, diagnostic)
-  } finally { connection.release() }
+  } finally { reservation.release() }
 }

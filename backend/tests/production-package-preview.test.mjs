@@ -14,6 +14,8 @@ import {
   PREVIEW_LIMITS,
   ProductionPackagePreviewError,
   createProductionPackagePreview,
+  extractProductionPackageUploadForConfirm,
+  getProductionPackageSnapshotForConfirm,
   getProductionPackagePreview,
   getProductionPackagePreviewShared,
   cleanupExpiredProductionPackagePreviews,
@@ -21,6 +23,7 @@ import {
   restoreProductionPackagePreviews,
   clearProductionPackagePreviews,
 } from '../src/services/production-package-preview.ts'
+import { canonicalSourceFromPackage } from '../src/services/production-package-parser.ts'
 import productionPackages, { createProductionPackagesRouter } from '../src/routes/productionPackages.ts'
 import { createPreviewSessionAuth, signPreviewIdentity, PREVIEW_AUTH_AUDIENCE, PREVIEW_AUTH_MAX_AGE_MS } from '../src/middleware/preview-auth.ts'
 import { previewRequestBodyLimit } from '../src/middleware/preview-request-body.ts'
@@ -173,6 +176,28 @@ test('ZIP 预览返回 parser DTO 并覆盖为快照 token，重复读取不写�
   assert.equal(preview.package.files.length >= 5, true)
   assert.deepEqual(getProductionPackagePreview(preview.preview_token, 'tenant:user-a'), preview)
   assert.throws(() => getProductionPackagePreview(preview.preview_token, 'tenant:user-b'), (error) => error.code === 'PACKAGE_PREVIEW_NOT_FOUND')
+})
+
+test('Confirm 仅使用已校验的原始 ZIP 重解压，且 canonical 正文哈希与预览一致', async () => {
+  const zip = await zipEntries(fixtureEntries())
+  const preview = await createProductionPackagePreview({ zip, owner: 'tenant:confirm-source' })
+  const snapshot = await getProductionPackageSnapshotForConfirm(preview.preview_token, 'tenant:confirm-source', {
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+  })
+
+  // The long-lived preview directory is shared infrastructure and must never
+  // become Confirm's trust source after the ZIP fingerprint was verified.
+  fs.writeFileSync(path.join(snapshot.root, 'episodes', '001.md'), 'tampered preview directory')
+  const reparsed = await extractProductionPackageUploadForConfirm(snapshot.uploadBytes)
+  try {
+    const canonical = canonicalSourceFromPackage(reparsed.packageRoot)
+    assert.equal(reparsed.preview.package.source_version_canonical_hash, preview.package.source_version_canonical_hash)
+    assert.equal(`sha256:${crypto.createHash('sha256').update(canonical).digest('hex')}`, preview.package.source_version_canonical_hash)
+    assert.notEqual(canonical, 'tampered preview directory\n')
+  } finally {
+    reparsed.cleanup()
+  }
 })
 
 test('单层包根可解析，路径穿越和根目录歧义在 parser 前阻断', async () => {
