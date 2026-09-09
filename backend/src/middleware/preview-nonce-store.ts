@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import fsp from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000 + 30_000
@@ -7,10 +8,12 @@ const CLEANUP_INTERVAL_MS = 60_000
 const DEFAULT_MAX_ENTRIES = 100_000
 const LOCK_STALE_MS = 60_000
 const LOCK_HEARTBEAT_MS = 10_000
+const MYSQL_LOCK_NAME = 'jisu:preview-auth:nonce-quota'
 
 function nonceRoot(): string {
   return process.env.PREVIEW_AUTH_NONCE_STORE_PATH || path.resolve(process.cwd(), 'data', 'preview-nonces')
 }
+function useMySqlStore(): boolean { return process.env.PREVIEW_AUTH_NONCE_STORE === 'mysql' }
 function maxEntries(): number {
   const parsed = Number(process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES || DEFAULT_MAX_ENTRIES)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_ENTRIES
@@ -20,12 +23,58 @@ function entryPath(root: string, key: string): string {
 }
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
+function lockOwner(): string {
+  return JSON.stringify({ host: os.hostname(), pid: process.pid, id: crypto.randomBytes(16).toString('hex') })
+}
+function ownerProcessIsDead(raw: string): boolean {
+  try {
+    const owner = JSON.parse(raw) as { host?: string; pid?: number }
+    const pid = owner.pid
+    if (owner.host !== os.hostname() || typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false
+    const safePid = pid as number
+    try { process.kill(safePid, 0); return false } catch (error: any) { return error?.code === 'ESRCH' }
+  } catch { return false }
+}
+async function syncDirectory(root: string): Promise<void> {
+  try {
+    const directory = await fsp.open(root, 'r')
+    try { await directory.sync() } finally { await directory.close() }
+  } catch (error: any) {
+    // POSIX directory fsync is required for crash durability.  Windows and
+    // some network filesystems reject opening directories for sync; the file
+    // itself is still durable and the unsupported operation is harmless.
+    if (!['EISDIR', 'EINVAL', 'ENOTSUP', 'EPERM'].includes(error?.code)) throw error
+  }
+}
+
+async function consumePreviewNonceMySql(key: string, expiresAt: number): Promise<boolean> {
+  const { pool } = await import('../db/index.js')
+  const connection = await pool.getConnection()
+  try {
+    const [lockRows] = await connection.query<any[]>('SELECT GET_LOCK(?, 10) AS acquired', [MYSQL_LOCK_NAME])
+    if (Number(lockRows[0]?.acquired) !== 1) throw Object.assign(new Error('preview nonce quota lock unavailable'), { code: 'PREVIEW_NONCE_STORE_UNAVAILABLE' })
+    try {
+      await connection.beginTransaction()
+      await connection.query('DELETE FROM preview_auth_nonces WHERE expires_at <= ?', [Date.now()])
+      const [rows] = await connection.query<any[]>('SELECT nonce_hash FROM preview_auth_nonces WHERE nonce_hash = ? FOR UPDATE', [crypto.createHash('sha256').update(key).digest('hex')])
+      if (rows.length) { await connection.rollback(); return false }
+      const [countRows] = await connection.query<any[]>('SELECT COUNT(*) AS count FROM preview_auth_nonces')
+      if (Number(countRows[0]?.count || 0) >= maxEntries()) { await connection.rollback(); return false }
+      const expiry = Math.max(Date.now() + 1, Math.min(expiresAt, Date.now() + DEFAULT_TTL_MS))
+      await connection.query('INSERT INTO preview_auth_nonces (nonce_hash, expires_at, created_at) VALUES (?, ?, ?)', [crypto.createHash('sha256').update(key).digest('hex'), expiry, new Date().toISOString()])
+      await connection.commit()
+      return true
+    } catch (error) { await connection.rollback().catch(() => undefined); throw error }
+    finally { await connection.query('SELECT RELEASE_LOCK(?)', [MYSQL_LOCK_NAME]).catch(() => undefined) }
+  } finally { connection.release() }
+}
+
 async function withStoreLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = path.join(root, '.quota.lock')
   for (;;) {
     try {
       const lock = await fsp.open(lockPath, 'wx', 0o600)
-      const owner = `${process.pid}:${crypto.randomBytes(16).toString('hex')}`
+      const owner = lockOwner()
       try {
         await lock.writeFile(owner, 'utf8')
         await lock.sync()
@@ -54,7 +103,25 @@ async function withStoreLock<T>(root: string, fn: () => Promise<T>): Promise<T> 
       if (error?.code !== 'EEXIST') throw error
       try {
         const stat = await fsp.stat(lockPath)
-        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) await fsp.rm(lockPath, { force: true })
+        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+          // Never delete a lock merely because its mtime is old.  A lock is
+          // reclaimable only when its recorded local owner process is gone;
+          // unknown-host owners remain conservative and block rather than
+          // risking two writers in a shared directory.
+          const currentOwner = await fsp.readFile(lockPath, 'utf8').catch(() => '')
+          if (currentOwner && ownerProcessIsDead(currentOwner)) {
+            // Atomic rename removes the stale name in one filesystem
+            // operation.  Competing reclaimers then get ENOENT and cannot
+            // accidentally remove a newly-created lock at lockPath.
+            const quarantine = `${lockPath}.stale.${process.pid}.${crypto.randomBytes(8).toString('hex')}`
+            try {
+              await fsp.rename(lockPath, quarantine)
+              await fsp.rm(quarantine, { force: true })
+            } catch (reclaimError: any) {
+              if (reclaimError?.code !== 'ENOENT') throw reclaimError
+            }
+          }
+        }
       } catch (statError: any) {
         if (statError?.code !== 'ENOENT') throw statError
       }
@@ -89,6 +156,7 @@ async function removeExpiredLocked(root: string, now: number): Promise<void> {
 }
 
 export async function consumePreviewNonce(key: string, expiresAt: number): Promise<boolean> {
+  if (useMySqlStore()) return consumePreviewNonceMySql(key, expiresAt)
   const root = nonceRoot()
   await fsp.mkdir(root, { recursive: true, mode: 0o700 })
   return withStoreLock(root, async () => {
@@ -108,7 +176,10 @@ export async function consumePreviewNonce(key: string, expiresAt: number): Promi
       await handle.writeFile(String(expiry), 'utf8')
       await handle.sync()
     } finally { await handle.close() }
-    try { await fsp.rename(temporary, file) } catch (error) {
+    try {
+      await fsp.rename(temporary, file)
+      await syncDirectory(root)
+    } catch (error) {
       await fsp.rm(temporary, { force: true }).catch(() => undefined)
       throw error
     }

@@ -1,6 +1,7 @@
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -56,6 +57,22 @@ async function createSignedRequest(pathname, { method = 'POST', body, tenantId =
 
 async function signedRequest(api, pathname, options = {}) {
   return api.fetch(await createSignedRequest(pathname, options))
+}
+
+function runNodeWorker(script, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx/esm', '--eval', script], {
+      cwd: path.join(path.dirname(fixtureRoot), '..', '..', '..', '..'),
+      env: { ...process.env, ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.once('error', reject)
+    child.once('exit', code => code === 0 ? resolve(stdout.trim()) : reject(new Error(`worker exited ${code}: ${stderr}`)))
+  })
 }
 
 async function zipEntries(entries) {
@@ -487,6 +504,26 @@ test('并发消费同一 nonce 只有一次成功', async () => {
   }
 })
 
+test('独立 Node 进程并发消费同一 nonce 只有一次成功', async () => {
+  const previousPath = process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+  const previousMaxEntries = process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-nonce-process-'))
+  const key = 'tenant-process\nuser-process\nnonce-process'
+  const script = "import { consumePreviewNonce } from './src/middleware/preview-nonce-store.ts'; const ok = await consumePreviewNonce(process.env.TEST_NONCE_KEY, Date.now() + 60000); process.stdout.write(ok ? '1' : '0')"
+  const env = { PREVIEW_AUTH_NONCE_STORE_PATH: root, PREVIEW_AUTH_NONCE_MAX_ENTRIES: '10', TEST_NONCE_KEY: key }
+  try {
+    const results = await Promise.all(Array.from({ length: 8 }, () => runNodeWorker(script, env)))
+    assert.equal(results.filter(value => value === '1').length, 1)
+    assert.equal((await fs.promises.readdir(root)).filter(name => name.endsWith('.nonce')).length, 1)
+  } finally {
+    if (previousPath === undefined) delete process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+    else process.env.PREVIEW_AUTH_NONCE_STORE_PATH = previousPath
+    if (previousMaxEntries === undefined) delete process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+    else process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = previousMaxEntries
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('并发创建不同 nonce 不得突破持久化总配额', async () => {
   const previousPath = process.env.PREVIEW_AUTH_NONCE_STORE_PATH
   const previousMaxEntries = process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
@@ -508,6 +545,27 @@ test('并发创建不同 nonce 不得突破持久化总配额', async () => {
   }
 })
 
+test('独立 Node 进程并发预留请求资源不得突破总预算', async () => {
+  const previousPath = process.env.PREVIEW_REQUEST_RESERVATION_PATH
+  const previousMaxConcurrent = process.env.PREVIEW_REQUEST_MAX_CONCURRENT
+  const previousMaxBytes = process.env.PREVIEW_REQUEST_MAX_SPOOL_BYTES
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-resource-process-'))
+  const script = "import { reservePreviewRequestSlot } from './src/middleware/preview-request-body.ts'; try { const release = await reservePreviewRequestSlot(); process.stdout.write('1'); await new Promise(resolve => setTimeout(resolve, 100)); await release() } catch (error) { if (error?.code === 'PREVIEW_REQUEST_BUSY') process.stdout.write('0'); else throw error }"
+  const env = { PREVIEW_REQUEST_RESERVATION_PATH: root, PREVIEW_REQUEST_MAX_CONCURRENT: '1', PREVIEW_REQUEST_MAX_SPOOL_BYTES: String(26 * 1024 * 1024) }
+  try {
+    const results = await Promise.all(Array.from({ length: 8 }, () => runNodeWorker(script, env)))
+    assert.equal(results.filter(value => value === '1').length, 1)
+  } finally {
+    if (previousPath === undefined) delete process.env.PREVIEW_REQUEST_RESERVATION_PATH
+    else process.env.PREVIEW_REQUEST_RESERVATION_PATH = previousPath
+    if (previousMaxConcurrent === undefined) delete process.env.PREVIEW_REQUEST_MAX_CONCURRENT
+    else process.env.PREVIEW_REQUEST_MAX_CONCURRENT = previousMaxConcurrent
+    if (previousMaxBytes === undefined) delete process.env.PREVIEW_REQUEST_MAX_SPOOL_BYTES
+    else process.env.PREVIEW_REQUEST_MAX_SPOOL_BYTES = previousMaxBytes
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('生产 Compose 注入密钥且实际 API 装配在缺密钥时关闭、有效断言时可用', async () => {
   process.env.NODE_ENV = 'test'
   process.env.MYSQL_NO_INIT = '1'
@@ -516,6 +574,11 @@ test('生产 Compose 注入密钥且实际 API 装配在缺密钥时关闭、有
   const compose = fs.readFileSync(path.join(path.dirname(fixtureRoot), '..', '..', '..', '..', '..', 'docker-compose.yml'), 'utf8')
   assert.match(compose, /PREVIEW_AUTH_PROXY_SECRET=\$\{PREVIEW_AUTH_PROXY_SECRET:\?\S[\s\S]*secret manager\}/)
   assert.match(compose, /deploy:\s+replicas:\s+1/)
+  assert.match(compose, /PREVIEW_AUTH_NONCE_STORE=mysql/)
+  assert.match(compose, /PREVIEW_REQUEST_RESOURCE_STORE=mysql/)
+  const mysqlSchema = fs.readFileSync(path.join(path.dirname(fixtureRoot), '..', '..', '..', '..', 'src', 'db', 'mysql-schema.ts'), 'utf8')
+  assert.match(mysqlSchema, /CREATE TABLE IF NOT EXISTS preview_auth_nonces/)
+  assert.match(mysqlSchema, /CREATE TABLE IF NOT EXISTS preview_request_leases/)
   const transportContract = fs.readFileSync(path.join(path.dirname(fixtureRoot), '..', '..', '..', '..', '..', 'docs', 'production-package-zip-transport-v0.1.md'), 'utf8')
   assert.match(transportContract, /SET preview-auth:nonce:<nonce> 1 NX PX/)
 

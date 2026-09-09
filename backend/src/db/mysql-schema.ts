@@ -318,6 +318,22 @@ export const mysqlSchemaStatements = [
     updated_at VARCHAR(64) NOT NULL,
     deleted_at VARCHAR(64)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  // Preview authentication/reliability state.  The unique nonce key and
+  // lease rows are shared by every backend process/replica; callers use a
+  // MySQL advisory lock around quota checks so count+insert is atomic.
+  `CREATE TABLE IF NOT EXISTS preview_auth_nonces (
+    nonce_hash CHAR(64) NOT NULL PRIMARY KEY,
+    expires_at BIGINT NOT NULL,
+    created_at VARCHAR(64) NOT NULL,
+    INDEX idx_preview_auth_nonces_expiry (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS preview_request_leases (
+    lease_id CHAR(64) NOT NULL PRIMARY KEY,
+    reserved_bytes BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    created_at VARCHAR(64) NOT NULL,
+    INDEX idx_preview_request_leases_expiry (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ]
 
 /**

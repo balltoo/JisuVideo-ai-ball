@@ -97,7 +97,15 @@ async function verifyTrustedIdentity(c: Parameters<MiddlewareHandler>[0], secret
   if (!supplied) return null
   if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return null
   const nonceKey = `${tenantId}\n${userId}\n${nonce}`
-  if (!(await consumePreviewNonce(nonceKey, expiresAt))) return null
+  try {
+    if (!(await consumePreviewNonce(nonceKey, expiresAt))) return null
+  } catch (error: any) {
+    // A configured shared nonce store is part of the authentication boundary.
+    // If it is unavailable, fail closed instead of treating the assertion as
+    // authenticated or returning an unrelated server error.
+    if (error?.code === 'PREVIEW_NONCE_STORE_UNAVAILABLE' || process.env.PREVIEW_AUTH_NONCE_STORE === 'mysql') throw Object.assign(new Error('preview nonce store unavailable'), { code: 'PREVIEW_NONCE_STORE_UNAVAILABLE' })
+    throw error
+  }
   return { tenantId, userId }
 }
 
@@ -110,7 +118,11 @@ export function createPreviewSessionAuth(secret = process.env.PREVIEW_AUTH_PROXY
   const key = validSecret(secret)
   return async (c, next) => {
     if (!key) return c.json({ code: 'PACKAGE_PREVIEW_AUTH_UNAVAILABLE', severity: 'error', message: '预览认证服务未配置' }, 503)
-    const identity = await verifyTrustedIdentity(c, key)
+    let identity: VerifiedPreviewIdentity | null
+    try { identity = await verifyTrustedIdentity(c, key) } catch (error: any) {
+      if (error?.code === 'PREVIEW_NONCE_STORE_UNAVAILABLE') return c.json({ code: 'PACKAGE_PREVIEW_AUTH_UNAVAILABLE', severity: 'error', message: '预览认证存储不可用' }, 503)
+      throw error
+    }
     if (!identity) return c.json({ code: 'PACKAGE_PREVIEW_UNAUTHORIZED', severity: 'error', message: '需要上游认证网关提供有效身份' }, 401)
     c.set('verifiedPreviewIdentity', identity)
     await next()
