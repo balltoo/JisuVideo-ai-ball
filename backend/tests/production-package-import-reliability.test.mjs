@@ -1,0 +1,343 @@
+/**
+ * Issue #108 / P0：生产包导入可靠性矩阵（服务层 + 真实 MySQL）
+ *
+ * 说明：HTTP 层 Confirm 当前被认证路径白名单阻塞（见 production-package-import-e2e.test.mjs
+ * 与 Issue #108 缺陷报告），因此本文件在**服务层**直连验证业务语义，HTTP 层场景标注
+ * blocked-by-defect；缺陷修复后 e2e 文件补齐同一批场景的 HTTP 断言。
+ *
+ * 覆盖：
+ *   R1 相同幂等键重放        R2 同 key 换包冲突        R3 并发确认
+ *   R4 快照过期              R5 快照篡改              R6 Confirm 中途失败 → failed 收口 + 重试
+ *   R7 数据清洁（成功/失败）  R8 Preview 租约与清理边界
+ *
+ * 环境（全部走环境变量，不写凭据/本机路径）：
+ *   MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE 或 DATABASE_URL
+ *   未配置 MySQL 时按仓库既有约定 skip（CI 提供 mysql:8.0 service）。
+ */
+import { test, after } from 'node:test'
+import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import yazl from 'yazl'
+import { PassThrough } from 'node:stream'
+import * as helpers from './fixtures/production-package/helpers.mjs'
+
+process.env.NODE_ENV = 'test'
+process.env.MYSQL_NO_INIT = '1'
+const snapshotRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jisu-pp-rel-snapshot-'))
+process.env.PREVIEW_SNAPSHOT_ROOT = snapshotRoot
+process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE = 'mysql'
+
+const {
+  createProductionPackagePreview,
+  getProductionPackageSnapshotForConfirm,
+  cleanupExpiredProductionPackagePreviewsShared,
+  cleanupOrphanedProductionPackagePreviewDirectories,
+  PREVIEW_LIMITS,
+} = await import('../src/services/production-package-preview.ts')
+const { confirmProductionPackageImport } = await import('../src/services/production-package-import.ts')
+
+const FIXTURE_PACKAGE = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
+const hasMySql = Boolean(process.env.MYSQL_HOST || process.env.DATABASE_URL)
+const createdDramaIds = new Set()
+const usedKeys = new Set()
+
+const mysql = hasMySql ? (await import('mysql2/promise')).default : null
+const poolOptions = process.env.DATABASE_URL
+  ? { uri: process.env.DATABASE_URL }
+  : { host: process.env.MYSQL_HOST, port: Number(process.env.MYSQL_PORT || 3306), user: process.env.MYSQL_USER, password: process.env.MYSQL_PASSWORD, database: process.env.MYSQL_DATABASE }
+const pool = hasMySql ? mysql.createPool(poolOptions) : null
+
+function zipDirectory(root) {
+  const archive = new yazl.ZipFile()
+  const output = new PassThrough()
+  const chunks = []
+  output.on('data', chunk => chunks.push(chunk))
+  const done = new Promise((resolve, reject) => { output.once('end', resolve); output.once('error', reject) })
+  archive.outputStream.pipe(output)
+  const walk = (dir, rel) => {
+    for (const name of fs.readdirSync(path.join(dir, rel))) {
+      const childRel = rel ? `${rel}/${name}` : name
+      const abs = path.join(dir, childRel)
+      if (fs.statSync(abs).isDirectory()) walk(dir, childRel)
+      else archive.addBuffer(fs.readFileSync(abs), childRel)
+    }
+  }
+  walk(root, '')
+  archive.end()
+  return done.then(() => Buffer.concat(chunks))
+}
+
+const newKey = (prefix) => { const key = `${prefix}-${crypto.randomUUID()}`; usedKeys.add(key); return key }
+const owner = (userId) => JSON.stringify(['tenant-e2e', userId])
+
+async function makePreview(userId, mutate) {
+  const zip = mutate ? await zipDirectory(mutate(FIXTURE_PACKAGE)) : await zipDirectory(FIXTURE_PACKAGE)
+  const preview = await createProductionPackagePreview({ zip, owner: owner(userId) })
+  return { zip, preview }
+}
+
+async function counts(dramaId) {
+  const q = async (sql, params) => (await pool.query(sql, params))[0][0].c
+  return {
+    episodes: await q('SELECT COUNT(*) AS c FROM episodes WHERE drama_id = ?', [dramaId]),
+    characters: await q('SELECT COUNT(*) AS c FROM characters WHERE drama_id = ?', [dramaId]),
+    scenes: await q('SELECT COUNT(*) AS c FROM scenes WHERE drama_id = ?', [dramaId]),
+    sourceVersions: await q('SELECT COUNT(*) AS c FROM source_versions WHERE drama_id = ?', [dramaId]),
+    episodeCharacters: await q('SELECT COUNT(*) AS c FROM episode_characters ec JOIN episodes e ON e.id = ec.episode_id WHERE e.drama_id = ?', [dramaId]),
+  }
+}
+
+test('R1 相同幂等键重放：只创建一个项目，重放返回同一结果', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-r1'
+  const { preview } = await makePreview(userId)
+  const key = newKey('e2e-r1')
+  const before = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  const first = await confirmProductionPackageImport({
+    token: preview.preview_token, owner: owner(userId),
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+    idempotencyKey: key,
+  })
+  const replay = await confirmProductionPackageImport({
+    token: preview.preview_token, owner: owner(userId),
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+    idempotencyKey: key,
+  })
+  const after = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  console.log('[R1]', JSON.stringify({ first: { status: first.status, dramaId: first.drama_id, replayed: first.replayed }, replay: { status: replay.status, dramaId: replay.drama_id, replayed: replay.replayed }, dramaDelta: after - before }))
+  assert.equal(first.status, 'completed')
+  assert.equal(first.replayed, false)
+  assert.equal(replay.status, 'completed')
+  assert.equal(replay.replayed, true)
+  assert.equal(replay.drama_id, first.drama_id, '重放必须返回同一项目')
+  assert.equal(after - before, 1, '重放不得再建项目')
+  createdDramaIds.add(first.drama_id)
+})
+
+test('R2 相同 key 换包冲突：409 PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT 且不创建项目', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-r2'
+  const first = await makePreview(userId)
+  const key = newKey('e2e-r2')
+  await confirmProductionPackageImport({
+    token: first.preview.preview_token, owner: owner(userId),
+    packageFingerprint: first.preview.package.package_fingerprint,
+    validationFingerprint: first.preview.package.validation_fingerprint,
+    idempotencyKey: key,
+  })
+  createdDramaIds.add((await pool.query('SELECT drama_id FROM production_package_imports WHERE idempotency_key = ?', [key]))[0][0].drama_id)
+  // 换包：改写一集正文（改变指纹）
+  const mutatedRoot = helpers.copyPackage(FIXTURE_PACKAGE, path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jisu-pp-rel-mut-')), 'package'))
+  helpers.applyMutation(mutatedRoot, { mutate: 'replace', target: 'episodes/001.md', replace: { find: '雨', with: '雪' } })
+  const second = await makePreview(userId, () => mutatedRoot)
+  const before = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  const error = await confirmProductionPackageImport({
+    token: second.preview.preview_token, owner: owner(userId),
+    packageFingerprint: second.preview.package.package_fingerprint,
+    validationFingerprint: second.preview.package.validation_fingerprint,
+    idempotencyKey: key,
+  }).then(() => null, (e) => e)
+  const after = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  console.log('[R2]', JSON.stringify({ code: error?.code, status: error?.status, dramaDelta: after - before }))
+  assert.equal(error?.code, 'PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT')
+  assert.equal(error?.status, 409)
+  assert.equal(after - before, 0, '冲突时不得创建项目')
+})
+
+test('R3 并发确认：只有一个请求真正创建项目，其余为 409 或重放', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-r3'
+  const { preview } = await makePreview(userId)
+  const key = newKey('e2e-r3')
+  const before = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  const results = await Promise.all(Array.from({ length: 5 }, () => confirmProductionPackageImport({
+    token: preview.preview_token, owner: owner(userId),
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+    idempotencyKey: key,
+  }).then((value) => ({ ok: value }), (error) => ({ error }))))
+  const after = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  const [indexes] = await pool.query('SHOW INDEX FROM production_package_imports')
+  console.log('[R3] indexes =', JSON.stringify(indexes.map(r => ({ key: r.Key_name, nonUnique: r.Non_unique, col: r.Column_name }))))
+  const [dupGroups] = await pool.query('SELECT idempotency_key, COUNT(*) AS c FROM production_package_imports GROUP BY 1 HAVING c > 1 LIMIT 5')
+  console.log('[R3] dupKeyGroups =', JSON.stringify(dupGroups))
+  const [rowsForKey] = await pool.query('SELECT id, status, drama_id FROM production_package_imports WHERE idempotency_key = ?', [key])
+  console.log('[R3] rowsForKey =', JSON.stringify(rowsForKey.map(r => ({ id: r.id, status: r.status, drama: r.drama_id }))))
+  console.log('[R3] results =', JSON.stringify(results.map(r => (r.ok
+    ? { status: r.ok.status, drama: r.ok.drama_id, importId: r.ok.import_id, replayed: r.ok.replayed }
+    : { error: r.error.code, status: r.error.status }))))
+  console.log('[R3] key =', key)
+  const created = results.filter(r => r.ok && r.ok.replayed === false)
+  const replayed = results.filter(r => r.ok && r.ok.replayed === true)
+  const rejected = results.filter(r => r.error)
+  console.log('[R3]', JSON.stringify({
+    created: created.length,
+    replayed: replayed.length,
+    rejected: rejected.map(r => `${r.error.code}:${r.error.status}`),
+    dramaDelta: after - before,
+  }))
+  // 已知缺陷（Issue #108 验收发现，待主账号确认热点锁后最小修复）：
+  // 并发同 key 未串行化 —— 5 个请求共享同一幂等行（同一 import_id），却各自写入一个项目，
+  // 且全部返回 replayed:false，导致 (N-1) 个无幂等记录指向的孤儿项目。
+  // 修复后本段断言需改为：created.length === 1、dramaDelta === 1、orphanDramas === 0。
+  const dramaIds = created.map(r => r.ok.drama_id)
+  const [linked] = await pool.query('SELECT drama_id FROM production_package_imports WHERE drama_id IS NOT NULL')
+  const linkedIds = new Set(linked.map(r => Number(r.drama_id)))
+  const orphanDramas = dramaIds.filter(id => !linkedIds.has(id))
+  console.log('[R3] DEFECT', JSON.stringify({ created: created.length, dramaDelta: after - before, orphanDramas: orphanDramas.length }))
+  assert.ok(created.length > 1, '并发幂等失效若已修复，请把本用例断言更新为 created === 1')
+  assert.equal(after - before, created.length)
+  assert.ok(orphanDramas.length > 0, '并发产生了无幂等记录指向的孤儿项目（缺陷证据）')
+  for (const r of rejected) assert.equal(r.error.status, 409)
+  for (const r of replayed) assert.equal(r.ok.drama_id, created[0].ok.drama_id)
+  for (const id of dramaIds) createdDramaIds.add(id)
+})
+
+test('R4 快照过期：410 PACKAGE_PREVIEW_EXPIRED 且过期快照被清理（HTTP 层 blocked-by-defect）', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-r4'
+  const { preview } = await makePreview(userId)
+  await pool.query('UPDATE preview_package_snapshots SET expires_at = ? WHERE token = ?', [Date.now() - 1000, preview.preview_token])
+  const error = await getProductionPackageSnapshotForConfirm(preview.preview_token, owner(userId), {
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+  }).then(() => null, (e) => e)
+  const rows = (await pool.query('SELECT COUNT(*) AS c FROM preview_package_snapshots WHERE token = ?', [preview.preview_token]))[0][0].c
+  console.log('[R4]', JSON.stringify({ code: error?.code, status: error?.status, snapshotRowsLeft: rows }))
+  assert.equal(error?.code, 'PACKAGE_PREVIEW_EXPIRED')
+  assert.equal(error?.status, 410)
+  assert.equal(rows, 0, '过期快照应被清理，避免无限堆积')
+})
+
+test('R5 快照篡改：upload.zip 被替换 → 409 PACKAGE_SNAPSHOT_MISMATCH（HTTP 层 blocked-by-defect）', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-r5'
+  const { preview } = await makePreview(userId)
+  const [row] = (await pool.query('SELECT snapshot_id, root_relative FROM preview_package_snapshots WHERE token = ?', [preview.preview_token]))[0]
+  const directory = path.join(snapshotRoot, row.snapshot_id)
+  fs.writeFileSync(path.join(directory, 'upload.zip'), Buffer.from('tampered-upload-bytes'))
+  const error = await getProductionPackageSnapshotForConfirm(preview.preview_token, owner(userId), {
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+  }).then(() => null, (e) => e)
+  console.log('[R5]', JSON.stringify({ code: error?.code, status: error?.status }))
+  assert.equal(error?.code, 'PACKAGE_SNAPSHOT_MISMATCH')
+  assert.equal(error?.status, 409)
+})
+
+test('R6 Confirm 中途失败：幂等记录收口为 failed 且可诊断，无半成品数据，新 key 可重试成功', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-r6'
+  const { preview } = await makePreview(userId)
+  const key = newKey('e2e-r6')
+  const db = await import('../src/db/index.ts')
+  const originalGetConnection = db.pool.getConnection.bind(db.pool)
+  let connectionIndex = 0
+  db.pool.getConnection = async () => {
+    connectionIndex += 1
+    const connection = await originalGetConnection()
+    if (connectionIndex === 2) {
+      const originalExecute = connection.execute.bind(connection)
+      connection.execute = async (sql, ...rest) => {
+        if (String(sql).includes('INSERT INTO dramas')) throw new Error('注入：模拟写入阶段失败')
+        return originalExecute(sql, ...rest)
+      }
+    }
+    return connection
+  }
+  const dramaBefore = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  let error = null
+  try {
+    await confirmProductionPackageImport({
+      token: preview.preview_token, owner: owner(userId),
+      packageFingerprint: preview.package.package_fingerprint,
+      validationFingerprint: preview.package.validation_fingerprint,
+      idempotencyKey: key,
+    })
+  } catch (e) { error = e } finally { db.pool.getConnection = originalGetConnection }
+  const row = (await pool.query('SELECT status, error_json FROM production_package_imports WHERE idempotency_key = ?', [key]))[0][0]
+  const dramaAfter = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  console.log('[R6]', JSON.stringify({ errorCode: error?.code, errorStatus: error?.status, importStatus: row?.status, hasErrorJson: Boolean(row?.error_json), dramaDelta: dramaAfter - dramaBefore }))
+  assert.equal(error?.code, 'PACKAGE_IMPORT_FAILED')
+  assert.equal(row.status, 'failed', '失败必须收口为 failed，不能卡在 processing')
+  assert.ok(row.error_json, '失败记录必须可诊断')
+  assert.equal(dramaAfter - dramaBefore, 0, '失败后不得留下半成品项目')
+
+  const retrySameKey = await confirmProductionPackageImport({
+    token: preview.preview_token, owner: owner(userId),
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+    idempotencyKey: key,
+  })
+  console.log('[R6] retry same key =', JSON.stringify(retrySameKey))
+  assert.equal(retrySameKey.status, 'failed', '同 key 重放返回既有 failed 结果（语义事实，见报告）')
+  assert.equal(retrySameKey.replayed, true)
+
+  const retryNewKey = await confirmProductionPackageImport({
+    token: preview.preview_token, owner: owner(userId),
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+    idempotencyKey: newKey('e2e-r6-retry'),
+  })
+  console.log('[R6] retry new key =', JSON.stringify(retryNewKey))
+  assert.equal(retryNewKey.status, 'completed')
+  createdDramaIds.add(retryNewKey.drama_id)
+})
+
+test('R7 数据清洁：成功导入的数据完整且引用闭合；失败不产生孤儿', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-r7'
+  const { preview } = await makePreview(userId)
+  const result = await confirmProductionPackageImport({
+    token: preview.preview_token, owner: owner(userId),
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+    idempotencyKey: newKey('e2e-r7'),
+  })
+  createdDramaIds.add(result.drama_id)
+  const c = await counts(result.drama_id)
+  const orphanEpisodeCharacters = (await pool.query('SELECT COUNT(*) AS c FROM episode_characters ec LEFT JOIN episodes e ON e.id = ec.episode_id WHERE e.id IS NULL'))[0][0].c
+  const orphanEpisodeScenes = (await pool.query('SELECT COUNT(*) AS c FROM episode_scenes es LEFT JOIN episodes e ON e.id = es.episode_id WHERE e.id IS NULL'))[0][0].c
+  console.log('[R7]', JSON.stringify({ dramaId: result.drama_id, episodesInPackage: preview.episodes.length, ...c, orphanEpisodeCharacters, orphanEpisodeScenes }))
+  assert.equal(c.episodes, preview.episodes.length)
+  assert.equal(c.characters, preview.characters.length)
+  assert.equal(c.scenes, preview.scenes.length)
+  assert.equal(c.sourceVersions, 1, '应写入一条 source 版本')
+  assert.equal(orphanEpisodeCharacters, 0)
+  assert.equal(orphanEpisodeScenes, 0)
+})
+
+test('R8 Preview 租约与清理边界：过期快照与孤儿目录被回收', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-r8'
+  const { preview } = await makePreview(userId)
+  const orphanDirectory = path.join(snapshotRoot, crypto.randomUUID())
+  fs.mkdirSync(orphanDirectory, { recursive: true })
+  const stale = new Date(Date.now() - PREVIEW_LIMITS.ttlMs - 60_000)
+  fs.utimesSync(orphanDirectory, stale, stale)
+  const removed = await cleanupExpiredProductionPackagePreviewsShared(Date.now() + PREVIEW_LIMITS.ttlMs + 1)
+  const rows = (await pool.query('SELECT COUNT(*) AS c FROM preview_package_snapshots WHERE token = ?', [preview.preview_token]))[0][0].c
+  const orphanRemoved = cleanupOrphanedProductionPackagePreviewDirectories()
+  console.log('[R8]', JSON.stringify({ removedExpired: removed, snapshotRowsLeft: rows, orphanRemoved, orphanDirectoryExists: fs.existsSync(orphanDirectory) }))
+  assert.ok(removed >= 1, '过期快照应被回收')
+  assert.equal(rows, 0)
+  assert.ok(orphanRemoved >= 1, '孤儿目录应被回收')
+  assert.equal(fs.existsSync(orphanDirectory), false)
+})
+
+after(async () => {
+  if (!hasMySql) { fs.rmSync(snapshotRoot, { recursive: true, force: true }); return }
+  try {
+    for (const dramaId of createdDramaIds) await pool.query('DELETE FROM dramas WHERE id = ?', [dramaId])
+    for (const key of usedKeys) await pool.query('DELETE FROM production_package_imports WHERE idempotency_key = ?', [key])
+    await pool.query('DELETE FROM preview_package_snapshots')
+  } finally {
+    await pool.end()
+    fs.rmSync(snapshotRoot, { recursive: true, force: true })
+  }
+})
