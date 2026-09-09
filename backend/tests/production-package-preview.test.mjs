@@ -283,3 +283,101 @@ test('主应用默认挂载路径使用上游签名身份，且不同身份不�
   const weak = await weakSecretApi.request('/production-packages/preview', { method: 'POST', body: form, headers: identityHeaders('tenant-integration', 'user-a', issuedAt, expiresAt, 'weak') })
   assert.equal(weak.status, 503)
 })
+
+test('签名身份 Header 拒绝重复值、非规范签名和非法身份字段', async () => {
+  const issuedAt = Date.now()
+  const expiresAt = issuedAt + 60_000
+  const identityHeaders = (tenantId = 'tenant-integration', userId = 'user-a') => ({
+    'x-authenticated-tenant-id': tenantId,
+    'x-authenticated-user-id': userId,
+    'x-authenticated-issued-at': String(issuedAt),
+    'x-authenticated-expires-at': String(expiresAt),
+    'x-authenticated-audience': PREVIEW_AUTH_AUDIENCE,
+    'x-authenticated-signature': signPreviewIdentity({ tenantId, userId, issuedAt, expiresAt, audience: PREVIEW_AUTH_AUDIENCE }, integrationSecret),
+  })
+  const form = new FormData()
+  form.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip'))
+
+  const duplicateUserHeaders = new Headers(identityHeaders())
+  duplicateUserHeaders.append('x-authenticated-user-id', 'second-user')
+  const duplicateUser = await integrationApi.request('/production-packages/preview', { method: 'POST', body: form, headers: duplicateUserHeaders })
+  assert.equal(duplicateUser.status, 401)
+
+  const duplicateSignatureHeaders = new Headers(identityHeaders())
+  duplicateSignatureHeaders.append('x-authenticated-signature', identityHeaders()['x-authenticated-signature'])
+  const duplicateSignature = await integrationApi.request('/production-packages/preview', { method: 'POST', body: form, headers: duplicateSignatureHeaders })
+  assert.equal(duplicateSignature.status, 401)
+
+  const validSignature = identityHeaders()['x-authenticated-signature']
+  const paddedSignature = await integrationApi.request('/production-packages/preview', {
+    method: 'POST', body: form, headers: { ...identityHeaders(), 'x-authenticated-signature': `${validSignature}=` },
+  })
+  assert.equal(paddedSignature.status, 401)
+
+  let standardSignatureHeaders = null
+  for (let index = 0; index < 10_000 && !standardSignatureHeaders; index += 1) {
+    const candidate = identityHeaders('tenant-integration', `user-${index}`)
+    if (/[-_]/.test(candidate['x-authenticated-signature'])) {
+      standardSignatureHeaders = {
+        ...candidate,
+        'x-authenticated-signature': candidate['x-authenticated-signature'].replace(/-/g, '+').replace(/_/g, '/'),
+      }
+    }
+  }
+  assert.ok(standardSignatureHeaders, 'test fixture should contain a URL-unsafe signature character')
+  const standardSignature = await integrationApi.request('/production-packages/preview', {
+    method: 'POST', body: form, headers: standardSignatureHeaders,
+  })
+  assert.equal(standardSignature.status, 401)
+
+  const invalidIdentityValues = [
+    ['tenant with space', 'user-a'],
+    [String.fromCharCode(0x80), 'user-a'], // non-ASCII byte rejected by the identity grammar
+    ['tenant-a', 'user,with-comma'],
+    ['tenant-a', `user-${'x'.repeat(128)}`],
+  ]
+  for (const [tenantId, userId] of invalidIdentityValues) {
+    const response = await integrationApi.request('/production-packages/preview', {
+      method: 'POST', body: form, headers: identityHeaders(tenantId, userId),
+    })
+    assert.equal(response.status, 401, `${tenantId}/${userId} should be rejected`)
+  }
+})
+
+test('认证密钥只接受规范且至少 32 字节的 Base64URL', async () => {
+  const issuedAt = Date.now()
+  const expiresAt = issuedAt + 60_000
+  const identity = { tenantId: 'tenant-integration', userId: 'user-a', issuedAt, expiresAt, audience: PREVIEW_AUTH_AUDIENCE }
+  const form = new FormData()
+  form.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip'))
+  const headers = {
+    'x-authenticated-tenant-id': identity.tenantId,
+    'x-authenticated-user-id': identity.userId,
+    'x-authenticated-issued-at': String(issuedAt),
+    'x-authenticated-expires-at': String(expiresAt),
+    'x-authenticated-audience': PREVIEW_AUTH_AUDIENCE,
+    'x-authenticated-signature': signPreviewIdentity(identity, integrationSecret),
+  }
+
+  const malformedSecrets = [
+    Buffer.alloc(32, 0xff).toString('base64'), // standard Base64 (+, / and padding)
+    `${integrationSecret}=`, // padded Base64URL
+    `${integrationSecret} `, // trailing whitespace
+    `${integrationSecret}!`, // non-alphabet character
+    Buffer.alloc(31, 7).toString('base64url'), // decodes below the minimum length
+  ]
+  for (const secret of malformedSecrets) {
+    const api = new Hono()
+    api.use('/production-packages/*', createPreviewSessionAuth(secret))
+    api.route('/production-packages', productionPackages)
+    const response = await api.request('/production-packages/preview', { method: 'POST', body: form, headers })
+    assert.equal(response.status, 503, `secret should fail closed: ${secret}`)
+    assert.equal((await response.json()).code, 'PACKAGE_PREVIEW_AUTH_UNAVAILABLE')
+  }
+
+  const validApi = new Hono()
+  validApi.use('/production-packages/*', createPreviewSessionAuth(integrationSecret))
+  validApi.route('/production-packages', productionPackages)
+  const valid = await validApi.request('/production-packages/preview', { method: 'POST', body: form, headers })
+  assert.equal(valid.status, 200)
+})

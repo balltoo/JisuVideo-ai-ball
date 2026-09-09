@@ -11,6 +11,8 @@ const AUTHENTICATED_SIGNATURE = 'x-authenticated-signature'
 export const PREVIEW_AUTH_AUDIENCE = 'production-package-preview'
 export const PREVIEW_AUTH_MAX_AGE_MS = 30 * 60 * 1000
 const CLOCK_SKEW_MS = 30_000
+const IDENTITY_FIELD_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/
 
 export type TrustedPreviewIdentity = VerifiedPreviewIdentity & {
   issuedAt: number
@@ -18,17 +20,28 @@ export type TrustedPreviewIdentity = VerifiedPreviewIdentity & {
   audience: typeof PREVIEW_AUTH_AUDIENCE
 }
 
-function validSecret(secret: string | undefined): Buffer | null {
-  if (!secret) return null
+function canonicalBase64Url(value: string): Buffer | null {
+  if (!BASE64URL_PATTERN.test(value)) return null
   try {
-    const decoded = Buffer.from(secret, 'base64url')
-    return decoded.length >= 32 ? decoded : null
+    const decoded = Buffer.from(value, 'base64url')
+    if (decoded.length === 0 || decoded.toString('base64url') !== value) return null
+    return decoded
   } catch { return null }
 }
 
+function validSecret(secret: string | undefined): Buffer | null {
+  if (!secret) return null
+  const decoded = canonicalBase64Url(secret)
+  return decoded && decoded.length >= 32 ? decoded : null
+}
+
 function header(c: Parameters<MiddlewareHandler>[0], name: string): string | null {
-  const value = c.req.header(name)?.trim()
-  return value || null
+  const value = c.req.header(name)
+  // Fetch Headers may combine duplicate field values with a comma. Every
+  // assertion field is a single value, so fail closed instead of allowing
+  // proxy/runtime-specific duplicate-header interpretation.
+  if (!value || value.includes(',')) return null
+  return value
 }
 
 function finiteNumber(value: string | null): number | null {
@@ -45,11 +58,12 @@ function verifyTrustedIdentity(c: Parameters<MiddlewareHandler>[0], secret: Buff
   const expiresAt = finiteNumber(header(c, AUTHENTICATED_EXP))
   const signature = header(c, AUTHENTICATED_SIGNATURE)
   if (!tenantId || !userId || audience !== PREVIEW_AUTH_AUDIENCE || issuedAt === null || expiresAt === null || !signature) return null
+  if (!IDENTITY_FIELD_PATTERN.test(tenantId) || !IDENTITY_FIELD_PATTERN.test(userId)) return null
   if (issuedAt > now + CLOCK_SKEW_MS || expiresAt <= now || expiresAt > now + PREVIEW_AUTH_MAX_AGE_MS || now - issuedAt > PREVIEW_AUTH_MAX_AGE_MS + CLOCK_SKEW_MS || expiresAt <= issuedAt) return null
   const canonical = `${audience}\n${tenantId}\n${userId}\n${issuedAt}\n${expiresAt}`
   const expected = crypto.createHmac('sha256', secret).update(canonical).digest()
-  let supplied: Buffer
-  try { supplied = Buffer.from(signature, 'base64url') } catch { return null }
+  const supplied = canonicalBase64Url(signature)
+  if (!supplied) return null
   if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return null
   return { tenantId, userId }
 }
