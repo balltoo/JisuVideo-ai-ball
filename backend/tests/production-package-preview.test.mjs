@@ -21,6 +21,7 @@ import {
 import productionPackages, { createProductionPackagesRouter } from '../src/routes/productionPackages.ts'
 import { createPreviewSessionAuth, signPreviewIdentity, PREVIEW_AUTH_AUDIENCE, PREVIEW_AUTH_MAX_AGE_MS } from '../src/middleware/preview-auth.ts'
 import { previewRequestBodyLimit } from '../src/middleware/preview-request-body.ts'
+import { consumePreviewNonce, previewNonceStorePath } from '../src/middleware/preview-nonce-store.ts'
 
 const fixtureRoot = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
 let verifiedIdentity = { tenantId: 'tenant-a', userId: 'route-user' }
@@ -442,6 +443,69 @@ test('同一 nonce 在两个 API 实例中只能消费一次', async () => {
   const request = await createSignedRequest('/production-packages/preview', { body: form })
   assert.equal((await apiA.fetch(request.clone())).status, 200)
   assert.equal((await apiB.fetch(request)).status, 401)
+})
+
+test('空的 nonce 记录按已消费处理且不会被清理', async () => {
+  const previousPath = process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+  const previousMaxEntries = process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-nonce-empty-'))
+  process.env.PREVIEW_AUTH_NONCE_STORE_PATH = root
+  process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = '10'
+  const key = 'tenant-empty\nuser-empty\nnonce-empty'
+  const digest = crypto.createHash('sha256').update(key).digest('hex')
+  const file = path.join(previewNonceStorePath(), `${digest}.nonce`)
+  try {
+    await fs.promises.writeFile(file, '', { mode: 0o600 })
+    assert.equal(await consumePreviewNonce(key, Date.now() + 60_000), false)
+    assert.equal(fs.existsSync(file), true)
+  } finally {
+    if (previousPath === undefined) delete process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+    else process.env.PREVIEW_AUTH_NONCE_STORE_PATH = previousPath
+    if (previousMaxEntries === undefined) delete process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+    else process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = previousMaxEntries
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('并发消费同一 nonce 只有一次成功', async () => {
+  const previousPath = process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+  const previousMaxEntries = process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-nonce-replay-'))
+  process.env.PREVIEW_AUTH_NONCE_STORE_PATH = root
+  process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = '10'
+  const key = 'tenant-race\nuser-race\nnonce-race'
+  try {
+    const results = await Promise.all(Array.from({ length: 32 }, () => consumePreviewNonce(key, Date.now() + 60_000)))
+    assert.equal(results.filter(Boolean).length, 1)
+    assert.equal((await fs.promises.readdir(root)).filter(name => name.endsWith('.nonce')).length, 1)
+  } finally {
+    if (previousPath === undefined) delete process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+    else process.env.PREVIEW_AUTH_NONCE_STORE_PATH = previousPath
+    if (previousMaxEntries === undefined) delete process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+    else process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = previousMaxEntries
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('并发创建不同 nonce 不得突破持久化总配额', async () => {
+  const previousPath = process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+  const previousMaxEntries = process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-nonce-quota-'))
+  process.env.PREVIEW_AUTH_NONCE_STORE_PATH = root
+  process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = '1'
+  try {
+    const results = await Promise.all(Array.from({ length: 32 }, (_, index) =>
+      consumePreviewNonce(`tenant-quota\nuser-quota\nnonce-${index}`, Date.now() + 60_000),
+    ))
+    assert.equal(results.filter(Boolean).length, 1)
+    assert.equal((await fs.promises.readdir(root)).filter(name => name.endsWith('.nonce')).length, 1)
+  } finally {
+    if (previousPath === undefined) delete process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+    else process.env.PREVIEW_AUTH_NONCE_STORE_PATH = previousPath
+    if (previousMaxEntries === undefined) delete process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+    else process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = previousMaxEntries
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
 })
 
 test('生产 Compose 注入密钥且实际 API 装配在缺密钥时关闭、有效断言时可用', async () => {
