@@ -88,11 +88,33 @@ ZIP 原始字节
 Preview API 只能运行在已接入服务端认证中间件的受控边界内：上游认证网关使用仅双方
 持有的 `PREVIEW_AUTH_PROXY_SECRET` 对身份断言签名，路由验证
 `x-authenticated-tenant-id`、`x-authenticated-user-id`、`x-authenticated-issued-at`、
-`x-authenticated-expires-at`、固定 audience 和签名后，才把身份写入请求上下文。客户端
-提交的 `x-user-id`、`x-tenant-id` 等 Header 不参与隔离判断。认证密钥缺失或强度不足时
+`x-authenticated-expires-at`、固定 audience、请求 method/path、请求体 SHA-256、单次
+nonce 和签名后，才把身份写入请求上下文。网关必须先读取待转发的原始 HTTP 请求体并计算
+SHA-256，再生成断言；后端会对收到的原始请求体重新计算并比对。客户端提交的
+`x-user-id`、`x-tenant-id` 等 Header 不参与隔离判断。认证密钥缺失或强度不足时
 功能保持关闭并返回 `PACKAGE_PREVIEW_AUTH_UNAVAILABLE`（HTTP 503）；断言缺失、过期或
 签名不正确时返回 `PACKAGE_PREVIEW_UNAUTHORIZED`（HTTP 401）。测试或内部调用必须模拟
 上游签名断言，不得直接伪造上下文。
+
+认证断言的请求绑定 Header 为：
+
+- `x-authenticated-method`：必须等于后端实际 HTTP method；
+- `x-authenticated-path`：必须等于后端实际路径，只允许 Preview 的 POST/GET 路径；
+- `x-authenticated-body-sha256`：原始 HTTP 请求体的 64 位小写十六进制 SHA-256；
+- `x-authenticated-nonce`：至少 128 bit、无填充 Base64URL 的一次性随机值。
+
+签名 canonical 字符串按以下顺序以单个换行连接：
+`audience、tenantId、userId、issuedAt、expiresAt、method、path、bodySha256、nonce`。
+后端在验证 HMAC 后只接受一次 nonce，并在有效期内缓存已消费 nonce；重复使用同一断言
+（包括网络重试）必须返回 401。网关应为每次新的请求签发新的 nonce。
+
+生产 Compose 闭环：`docker-compose.yml` 中的后端服务使用必填插值
+`${PREVIEW_AUTH_PROXY_SECRET:?Set PREVIEW_AUTH_PROXY_SECRET via the deployment secret manager}`。
+部署平台启动 Compose 前，必须从 secret manager 将同一个、至少 32 随机字节的无填充
+Base64URL 值注入环境（示例：`PREVIEW_AUTH_PROXY_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\\n=')" docker compose up -d --build`；实际环境应由 secret manager 注入，不能把值写入仓库或日志）。
+上游网关从同一 secret manager 读取密钥，删除客户端带来的全部 `x-authenticated-*` 同名
+Header 后，读取原始请求体、计算绑定字段、生成新的 nonce 和 HMAC Header，再转发到后端。
+未注入密钥时 Compose 不应启动预览服务；若应用被单独启动，接口保持 `503` fail closed。
 
 1. 校验请求身份、内容类型和原始字节上限；
 2. 将原始 ZIP 写入服务端专用临时目录，文件名使用随机值；

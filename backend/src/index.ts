@@ -53,28 +53,35 @@ app.use('/api/v1/dramas/*', bodyLimit({
 // Health check
 app.get('/api/v1/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }))
 
-// API routes
-const api = new Hono()
-api.route('/dramas', dramas)
-api.route('/episodes', episodes)
-api.route('/storyboards', storyboards)
-api.route('/scenes', scenes)
-api.route('/characters', characters)
-api.route('/tasks', tasks)
-api.route('/upload', upload)
-api.route('/ai-configs', aiConfigs)
-api.route('/ai-providers', aiProviders)
-api.route('/style-presets', stylePresets)
-api.route('/prompts', prompts)
-api.route('/agent', agent)
-api.route('/merge', merge)
-api.route('/skills', skills)
-api.route('/props', props)
-api.route('/assets', assets)
-// Production-package previews require a server-verified signed session. The
-// router itself only consumes the identity placed in Hono context here.
-api.use('/production-packages/*', createPreviewSessionAuth())
-api.route('/production-packages', productionPackages)
+// API routes. Keeping this factory exported lets deployment tests exercise the
+// same auth/router assembly as the production entrypoint without starting a
+// listener or background jobs.
+export function createApi(previewAuthSecret = process.env.PREVIEW_AUTH_PROXY_SECRET) {
+  const api = new Hono()
+  api.route('/dramas', dramas)
+  api.route('/episodes', episodes)
+  api.route('/storyboards', storyboards)
+  api.route('/scenes', scenes)
+  api.route('/characters', characters)
+  api.route('/tasks', tasks)
+  api.route('/upload', upload)
+  api.route('/ai-configs', aiConfigs)
+  api.route('/ai-providers', aiProviders)
+  api.route('/style-presets', stylePresets)
+  api.route('/prompts', prompts)
+  api.route('/agent', agent)
+  api.route('/merge', merge)
+  api.route('/skills', skills)
+  api.route('/props', props)
+  api.route('/assets', assets)
+  // Production-package previews require a server-verified signed session. The
+  // router itself only consumes the identity placed in Hono context here.
+  api.use('/production-packages/*', createPreviewSessionAuth(previewAuthSecret))
+  api.route('/production-packages', productionPackages)
+  return api
+}
+
+const api = createApi()
 
 app.route('/api/v1', api)
 
@@ -92,23 +99,31 @@ app.use('*', serveStatic({ root: distPath }))
 app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
 
 const port = Number(process.env.PORT || 5679)
-console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)
 
-// 进程重启后内存中的轮询线程全部丢失：视频任务可凭上游 taskId 续跑（避免已产生费用的任务丢失），
-// 拼接任务与图片任务无恢复价值则标记 failed，避免前端一直显示"生成中"
-const runInterruptedTaskRecovery = () => {
-  recoverInterruptedTasks()
-    .catch(err => console.error('恢复中断任务失败:', err?.message))
+// Importing the app in integration tests must not open a listener or start
+// background jobs. The normal `tsx src/index.ts` entrypoint still runs them.
+const isMainModule = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMainModule) {
+  console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)
+
+  // 进程重启后内存中的轮询线程全部丢失：视频任务可凭上游 taskId 续跑（避免已产生费用的任务丢失），
+  // 拼接任务与图片任务无恢复价值则标记 failed，避免前端一直显示"生成中"
+  const runInterruptedTaskRecovery = () => {
+    recoverInterruptedTasks()
+      .catch(err => console.error('恢复中断任务失败:', err?.message))
+  }
+
+  runInterruptedTaskRecovery()
+  // 旧实例崩溃后遗留的租约会在最长五分钟后过期。周期扫描接管到期租约，
+  // 防止冷重启首次扫描跳过后任务永久停留在 processing。
+  const recoveryTimer = setInterval(runInterruptedTaskRecovery, 60_000)
+  recoveryTimer.unref()
+
+  // 存储清理定时任务：temp TTL + 孤儿文件 GC（间隔/保留时长见 utils/cleanup.ts 环境变量）
+  startStorageCleanup()
+  startProductionPackagePreviewCleanup()
+
+  serve({ fetch: app.fetch, port })
 }
 
-runInterruptedTaskRecovery()
-// 旧实例崩溃后遗留的租约会在最长五分钟后过期。周期扫描接管到期租约，
-// 防止冷重启首次扫描跳过后任务永久停留在 processing。
-const recoveryTimer = setInterval(runInterruptedTaskRecovery, 60_000)
-recoveryTimer.unref()
-
-// 存储清理定时任务：temp TTL + 孤儿文件 GC（间隔/保留时长见 utils/cleanup.ts 环境变量）
-startStorageCleanup()
-startProductionPackagePreviewCleanup()
-
-serve({ fetch: app.fetch, port })
+export { app }
