@@ -15,7 +15,9 @@ import {
   ProductionPackagePreviewError,
   createProductionPackagePreview,
   getProductionPackagePreview,
+  getProductionPackagePreviewShared,
   cleanupExpiredProductionPackagePreviews,
+  cleanupExpiredProductionPackagePreviewsShared,
   restoreProductionPackagePreviews,
   clearProductionPackagePreviews,
 } from '../src/services/production-package-preview.ts'
@@ -590,6 +592,51 @@ test('独立 Node 进程并发预留请求资源不得突破总预算', async ()
   }
 })
 
+test('MySQL 快照索引让另一后端进程可读取同一预览，并保持租户隔离与过期清理', async (t) => {
+  // The regular local suite deliberately has no database prerequisite. CI
+  // supplies MySQL, where this exercises the same two-process topology used
+  // by the production Compose configuration.
+  if (!process.env.MYSQL_HOST && !process.env.DATABASE_URL) {
+    t.skip('requires the CI MySQL service')
+    return
+  }
+  const previousStore = process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE
+  const previousRoot = process.env.PREVIEW_SNAPSHOT_ROOT
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-shared-snapshot-'))
+  process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE = 'mysql'
+  process.env.PREVIEW_SNAPSHOT_ROOT = root
+  const mysql = (await import('mysql2/promise')).default
+  const options = process.env.DATABASE_URL
+    ? { uri: process.env.DATABASE_URL }
+    : { host: process.env.MYSQL_HOST, port: Number(process.env.MYSQL_PORT || 3306), user: process.env.MYSQL_USER, password: process.env.MYSQL_PASSWORD, database: process.env.MYSQL_DATABASE }
+  const pool = mysql.createPool(options)
+  try {
+    const { initMySqlSchema } = await import('../src/db/mysql-schema.ts')
+    await initMySqlSchema(pool)
+    await pool.query('DELETE FROM preview_package_snapshots')
+    const preview = await createProductionPackagePreview({ zip: await zipEntries(fixtureEntries()), owner: 'tenant-a:user-a' })
+
+    const worker = "import { getProductionPackagePreviewShared } from './src/services/production-package-preview.ts'; const token = process.env.TEST_PREVIEW_TOKEN; try { const preview = await getProductionPackagePreviewShared(token, 'tenant-a:user-a'); process.stdout.write(JSON.stringify({ token: preview.preview_token })); process.exit(0) } catch (error) { console.error(error); process.exit(1) }"
+    const fromOtherProcess = JSON.parse(await runNodeWorker(worker, {
+      PREVIEW_PACKAGE_SNAPSHOT_STORE: 'mysql',
+      PREVIEW_SNAPSHOT_ROOT: root,
+      TEST_PREVIEW_TOKEN: preview.preview_token,
+    }))
+    assert.equal(fromOtherProcess.token, preview.preview_token)
+    await assert.rejects(() => getProductionPackagePreviewShared(preview.preview_token, 'tenant-a:user-b'), (error) => error.code === 'PACKAGE_PREVIEW_NOT_FOUND')
+    assert.equal(await cleanupExpiredProductionPackagePreviewsShared(Date.now() + PREVIEW_LIMITS.ttlMs + 1), 1)
+    await assert.rejects(() => getProductionPackagePreviewShared(preview.preview_token, 'tenant-a:user-a'), (error) => error.code === 'PACKAGE_PREVIEW_NOT_FOUND')
+  } finally {
+    await pool.query('DELETE FROM preview_package_snapshots').catch(() => undefined)
+    await pool.end()
+    if (previousStore === undefined) delete process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE
+    else process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE = previousStore
+    if (previousRoot === undefined) delete process.env.PREVIEW_SNAPSHOT_ROOT
+    else process.env.PREVIEW_SNAPSHOT_ROOT = previousRoot
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('生产 Compose 注入密钥且实际 API 装配在缺密钥时关闭、有效断言时可用', async () => {
   process.env.NODE_ENV = 'test'
   process.env.MYSQL_NO_INIT = '1'
@@ -600,9 +647,12 @@ test('生产 Compose 注入密钥且实际 API 装配在缺密钥时关闭、有
   assert.match(compose, /deploy:\s+replicas:\s+1/)
   assert.match(compose, /PREVIEW_AUTH_NONCE_STORE=mysql/)
   assert.match(compose, /PREVIEW_REQUEST_RESOURCE_STORE=mysql/)
+  assert.match(compose, /PREVIEW_PACKAGE_SNAPSHOT_STORE=mysql/)
+  assert.match(compose, /PREVIEW_SNAPSHOT_ROOT=\/app\/data\/production-package-previews/)
   const mysqlSchema = fs.readFileSync(path.join(path.dirname(fixtureRoot), '..', '..', '..', '..', 'src', 'db', 'mysql-schema.ts'), 'utf8')
   assert.match(mysqlSchema, /CREATE TABLE IF NOT EXISTS preview_auth_nonces/)
   assert.match(mysqlSchema, /CREATE TABLE IF NOT EXISTS preview_request_leases/)
+  assert.match(mysqlSchema, /CREATE TABLE IF NOT EXISTS preview_package_snapshots/)
   const transportContract = fs.readFileSync(path.join(path.dirname(fixtureRoot), '..', '..', '..', '..', '..', 'docs', 'production-package-zip-transport-v0.1.md'), 'utf8')
   assert.match(transportContract, /SET preview-auth:nonce:<nonce> 1 NX PX/)
 

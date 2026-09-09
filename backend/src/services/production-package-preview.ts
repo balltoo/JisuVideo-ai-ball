@@ -51,8 +51,18 @@ type Snapshot = {
 }
 
 const snapshots = new Map<string, Snapshot>()
-const snapshotRoot = path.join(os.tmpdir(), 'jisu-production-package-previews')
 const SNAPSHOT_METADATA = 'snapshot.json'
+
+function snapshotRoot(): string {
+  // Docker production explicitly mounts this under /app/data.  Keep the
+  // system-temp default for local development and the existing file-based
+  // recovery tests.
+  return process.env.PREVIEW_SNAPSHOT_ROOT || path.join(os.tmpdir(), 'jisu-production-package-previews')
+}
+
+function useMySqlSnapshotStore(): boolean { return process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE === 'mysql' }
+function snapshotDirectoryFor(snapshotId: string): string { return path.join(snapshotRoot(), snapshotId) }
+function safeSnapshotId(snapshotId: unknown): snapshotId is string { return typeof snapshotId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(snapshotId) }
 
 function archiveError(message: string, status = 400): ProductionPackagePreviewError {
   return new ProductionPackagePreviewError('PACKAGE_ARCHIVE_INVALID', message, status)
@@ -107,7 +117,7 @@ function openZip(buffer: Buffer): Promise<ZipFile> {
 async function extractZip(buffer: Buffer): Promise<{ packageRoot: string; snapshotDirectory: string }> {
   if (buffer.length > PREVIEW_LIMITS.maxUploadBytes) throw new ProductionPackagePreviewError('PACKAGE_ARCHIVE_LIMIT', 'ZIP 大小不能超过 25 MiB', 413)
   const snapshotId = crypto.randomUUID()
-  const snapshotDirectory = path.join(snapshotRoot, snapshotId)
+  const snapshotDirectory = snapshotDirectoryFor(snapshotId)
   const destination = path.join(snapshotDirectory, 'package')
   let zip: ZipFile | undefined
   try {
@@ -206,11 +216,13 @@ function persistSnapshot(snapshot: Snapshot): void {
 }
 
 export function restoreProductionPackagePreviews(now = Date.now()): number {
-  if (!fs.existsSync(snapshotRoot)) return 0
+  // In production MySQL is the source of truth.  Rehydrating local metadata
+  // here would let a stale directory resurrect a deleted shared snapshot.
+  if (useMySqlSnapshotStore() || !fs.existsSync(snapshotRoot())) return 0
   let restored = 0
-  for (const entry of fs.readdirSync(snapshotRoot, { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(snapshotRoot(), { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
-    const directory = path.join(snapshotRoot, entry.name)
+    const directory = path.join(snapshotRoot(), entry.name)
     try {
       const metadata = JSON.parse(fs.readFileSync(path.join(directory, SNAPSHOT_METADATA), 'utf8')) as Partial<Snapshot> & { rootRelative?: string; uploadRelative?: string }
       if (typeof metadata.token !== 'string' || typeof metadata.owner !== 'string' || typeof metadata.expiresAt !== 'number' || metadata.expiresAt <= now || typeof metadata.rootRelative !== 'string' || metadata.uploadRelative !== 'upload.zip') {
@@ -244,8 +256,62 @@ export function restoreProductionPackagePreviews(now = Date.now()): number {
   return restored
 }
 
+async function saveSnapshotToMySql(snapshot: Snapshot): Promise<void> {
+  const { pool } = await import('../db/index.js')
+  await pool.query(
+    `INSERT INTO preview_package_snapshots
+      (token, snapshot_id, owner, created_at, upload_sha256, package_fingerprint, validation_fingerprint, expires_at, root_relative, preview_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [snapshot.token, snapshot.snapshotId, snapshot.owner, snapshot.createdAt, snapshot.uploadSha256, snapshot.packageFingerprint, snapshot.validationFingerprint, snapshot.expiresAt, path.relative(snapshot.snapshotDirectory, snapshot.root), JSON.stringify(snapshot.preview)],
+  )
+}
+
+async function deleteSnapshotFromMySql(token: string): Promise<void> {
+  if (!useMySqlSnapshotStore()) return
+  const { pool } = await import('../db/index.js')
+  await pool.query('DELETE FROM preview_package_snapshots WHERE token = ?', [token])
+}
+
+async function loadSnapshotFromMySql(token: string): Promise<Snapshot | undefined> {
+  const { pool } = await import('../db/index.js')
+  const [rows] = await pool.query<any[]>(
+    `SELECT token, snapshot_id, owner, created_at, upload_sha256, package_fingerprint, validation_fingerprint, expires_at, root_relative, preview_json
+       FROM preview_package_snapshots WHERE token = ? LIMIT 1`,
+    [token],
+  )
+  const row = rows[0]
+  if (!row || !safeSnapshotId(row.snapshot_id) || typeof row.owner !== 'string' || typeof row.root_relative !== 'string') return undefined
+  try {
+    const snapshotDirectory = snapshotDirectoryFor(row.snapshot_id)
+    const root = path.resolve(snapshotDirectory, row.root_relative)
+    if (!root.startsWith(`${snapshotDirectory}${path.sep}`) || !fs.statSync(root).isDirectory()) return undefined
+    const preview = JSON.parse(String(row.preview_json)) as ProductionPackagePreview
+    if (!preview || typeof preview !== 'object' || preview.preview_token !== token) return undefined
+    return {
+      token,
+      snapshotId: row.snapshot_id,
+      owner: row.owner,
+      createdAt: Number(row.created_at),
+      uploadSha256: String(row.upload_sha256),
+      snapshotDirectory,
+      root,
+      packageFingerprint: String(row.package_fingerprint),
+      validationFingerprint: String(row.validation_fingerprint),
+      expiresAt: Number(row.expires_at),
+      preview,
+    }
+  } catch { return undefined }
+}
+
+async function removeSnapshot(snapshot: Snapshot): Promise<void> {
+  snapshots.delete(snapshot.token)
+  await deleteSnapshotFromMySql(snapshot.token)
+  fs.rmSync(snapshot.snapshotDirectory, { recursive: true, force: true })
+}
+
 export async function createProductionPackagePreview(input: { zip: Buffer; owner: string }): Promise<ProductionPackagePreview> {
-  cleanupExpiredProductionPackagePreviews()
+  if (useMySqlSnapshotStore()) await cleanupExpiredProductionPackagePreviewsShared()
+  else cleanupExpiredProductionPackagePreviews()
   const extracted = await extractZip(input.zip)
   const { packageRoot, snapshotDirectory } = extracted
   try {
@@ -257,6 +323,7 @@ export async function createProductionPackagePreview(input: { zip: Buffer; owner
     const preview = { ...parsed, preview_token: token } as ProductionPackagePreview
     const snapshot: Snapshot = { token, snapshotId, owner: input.owner, createdAt, uploadSha256: crypto.createHash('sha256').update(input.zip).digest('hex'), snapshotDirectory, root: packageRoot, packageFingerprint: parsed.package.package_fingerprint, validationFingerprint: parsed.package.validation_fingerprint, expiresAt, preview }
     persistSnapshot(snapshot)
+    if (useMySqlSnapshotStore()) await saveSnapshotToMySql(snapshot)
     snapshots.set(token, snapshot)
     return preview
   } catch (error) {
@@ -276,6 +343,23 @@ export function getProductionPackagePreview(token: string, owner: string): Produ
   return snapshot.preview
 }
 
+/**
+ * Production route lookup.  With the MySQL store enabled every process reads
+ * the same metadata row, while the package files live on PREVIEW_SNAPSHOT_ROOT
+ * (the shared Docker data volume).  The old synchronous getter remains for
+ * local/file-store callers and compatibility tests.
+ */
+export async function getProductionPackagePreviewShared(token: string, owner: string): Promise<ProductionPackagePreview> {
+  const snapshot = useMySqlSnapshotStore() ? await loadSnapshotFromMySql(token) : snapshots.get(token)
+  if (!snapshot) throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_NOT_FOUND', '预览已不存在或已被清理', 404)
+  if (snapshot.expiresAt <= Date.now()) {
+    await removeSnapshot(snapshot)
+    throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_EXPIRED', '预览已过期，请重新上传', 410)
+  }
+  if (snapshot.owner !== owner) throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_NOT_FOUND', '预览不存在', 404)
+  return snapshot.preview
+}
+
 export function cleanupExpiredProductionPackagePreviews(now = Date.now()): number {
   let removed = 0
   for (const [token, snapshot] of snapshots) if (snapshot.expiresAt <= now) {
@@ -284,13 +368,31 @@ export function cleanupExpiredProductionPackagePreviews(now = Date.now()): numbe
   return removed
 }
 
+export async function cleanupExpiredProductionPackagePreviewsShared(now = Date.now()): Promise<number> {
+  if (!useMySqlSnapshotStore()) return cleanupExpiredProductionPackagePreviews(now)
+  const { pool } = await import('../db/index.js')
+  const [rows] = await pool.query<any[]>(
+    `SELECT token, snapshot_id, owner, created_at, upload_sha256, package_fingerprint, validation_fingerprint, expires_at, root_relative, preview_json
+       FROM preview_package_snapshots WHERE expires_at <= ?`,
+    [now],
+  )
+  await pool.query('DELETE FROM preview_package_snapshots WHERE expires_at <= ?', [now])
+  let removed = 0
+  for (const row of rows) {
+    if (safeSnapshotId(row.snapshot_id)) fs.rmSync(snapshotDirectoryFor(row.snapshot_id), { recursive: true, force: true })
+    if (typeof row.token === 'string') snapshots.delete(row.token)
+    removed += 1
+  }
+  return removed
+}
+
 /** Remove snapshot directories left behind by a process crash before the in-memory index was rebuilt. */
 export function cleanupOrphanedProductionPackagePreviewDirectories(now = Date.now()): number {
-  if (!fs.existsSync(snapshotRoot)) return 0
+  if (!fs.existsSync(snapshotRoot())) return 0
   let removed = 0
-  for (const entry of fs.readdirSync(snapshotRoot, { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(snapshotRoot(), { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
-    const directory = path.join(snapshotRoot, entry.name)
+    const directory = path.join(snapshotRoot(), entry.name)
     try {
       const age = now - fs.statSync(directory).mtimeMs
       if (age >= PREVIEW_LIMITS.ttlMs) { fs.rmSync(directory, { recursive: true, force: true }); removed += 1 }
@@ -303,7 +405,7 @@ export function startProductionPackagePreviewCleanup(intervalMs = 5 * 60 * 1000)
   restoreProductionPackagePreviews()
   cleanupOrphanedProductionPackagePreviewDirectories()
   const timer = setInterval(() => {
-    cleanupExpiredProductionPackagePreviews()
+    void cleanupExpiredProductionPackagePreviewsShared().catch(error => console.error('[production-package-preview] cleanup failed', error))
     cleanupOrphanedProductionPackagePreviewDirectories()
   }, intervalMs)
   timer.unref()

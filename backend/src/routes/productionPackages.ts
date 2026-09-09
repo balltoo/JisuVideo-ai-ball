@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { success } from '../utils/response.js'
-import { createProductionPackagePreview, getProductionPackagePreview, ProductionPackagePreviewError, PREVIEW_LIMITS } from '../services/production-package-preview.js'
+import { createProductionPackagePreview, getProductionPackagePreviewShared, ProductionPackagePreviewError, PREVIEW_LIMITS } from '../services/production-package-preview.js'
 import { MAX_PREVIEW_REQUEST_BYTES } from '../middleware/preview-request-body.js'
 
 export type VerifiedPreviewIdentity = {
@@ -60,11 +60,11 @@ export function createProductionPackagesRouter(resolveIdentity: PreviewIdentityR
     } catch (error) { return previewError(c, error) }
   })
 
-  app.get('/preview/:token', (c) => {
+  app.get('/preview/:token', async (c) => {
     try {
       const identity = resolveIdentity(c)
       if (!identity) return c.json({ code: 'PACKAGE_PREVIEW_UNAUTHORIZED', severity: 'error', message: '需要已验证的登录身份' }, 401)
-      return success(c, getProductionPackagePreview(c.req.param('token'), ownerOf(identity)))
+      return success(c, await getProductionPackagePreviewShared(c.req.param('token'), ownerOf(identity)))
     } catch (error) { return previewError(c, error) }
   })
 

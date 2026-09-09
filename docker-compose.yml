@@ -20,7 +20,7 @@ services:
 
   huobao-drama:
     build: .
-    # Preview 的 nonce 与请求资源预算均使用 MySQL 共享原子存储；可安全跨进程/副本复用
+    # Preview 的 nonce、请求资源预算和预览快照索引均使用共享存储；可安全跨进程/副本复用
     deploy:
       replicas: 1
       mode: replicated
@@ -43,6 +43,9 @@ services:
       # nonce 使用 MySQL 唯一键 + TTL + advisory lock，跨重启/多副本保持原子去重
       - PREVIEW_AUTH_NONCE_STORE=mysql
       - PREVIEW_AUTH_NONCE_MAX_ENTRIES=100000
+      # 预览 token 元数据在 MySQL，原始 ZIP/解压包在 ./data 共享卷；任一副本均可读取
+      - PREVIEW_PACKAGE_SNAPSHOT_STORE=mysql
+      - PREVIEW_SNAPSHOT_ROOT=/app/data/production-package-previews
       # 浏览器来源白名单（逗号分隔）；默认 localhost:3013,localhost:5679
       # - CORS_ORIGIN=http://localhost:3013,http://localhost:5679
       # 参考媒体 dataURL 内联兜底提示（参考视频/音频走公网地址需配置）

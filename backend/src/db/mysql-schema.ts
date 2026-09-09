@@ -334,6 +334,23 @@ export const mysqlSchemaStatements = [
     created_at VARCHAR(64) NOT NULL,
     INDEX idx_preview_request_leases_expiry (expires_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  // Preview package metadata is short-lived infrastructure state, not a
+  // business-domain write.  It makes a preview token resolvable on any
+  // backend replica while the extracted package itself stays on the shared
+  // PREVIEW_SNAPSHOT_ROOT volume.
+  `CREATE TABLE IF NOT EXISTS preview_package_snapshots (
+    token VARCHAR(64) NOT NULL PRIMARY KEY,
+    snapshot_id CHAR(36) NOT NULL,
+    owner VARCHAR(512) NOT NULL,
+    created_at BIGINT NOT NULL,
+    upload_sha256 CHAR(64) NOT NULL,
+    package_fingerprint CHAR(64) NOT NULL,
+    validation_fingerprint CHAR(64) NOT NULL,
+    expires_at BIGINT NOT NULL,
+    root_relative VARCHAR(512) NOT NULL,
+    preview_json LONGTEXT NOT NULL,
+    INDEX idx_preview_package_snapshots_expiry (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ]
 
 /**
