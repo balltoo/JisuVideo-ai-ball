@@ -76,8 +76,16 @@ export const requestLogger: MiddlewareHandler = async (c, next) => {
   if (['POST', 'PUT', 'PATCH'].includes(method)) {
     const contentType = c.req.header('content-type') || ''
     const containsCreativeContent = /\/dramas\/(?:analyze-source|import-source|\d+\/(?:analyze-episodes|episode-plan|episodes\/from-plan))$/.test(path)
+    // Preview uploads are bounded by their own stream guard later in the
+    // middleware chain. Never clone/read their body here: a client can omit
+    // or spoof Content-Type, and logging must not become an unbounded pre-auth
+    // buffering path before previewRequestBodyLimit() gets a chance to enforce
+    // the request budget.
+    const isProductionPackagePreview = /^\/api\/v1\/production-packages\/preview(?:\/|$)/.test(path)
     if (containsCreativeContent) {
       bodyInfo = `\n  ${colors.dim}body: <creative content omitted>${colors.reset}`
+    } else if (isProductionPackagePreview) {
+      bodyInfo = `\n  ${colors.dim}body: <preview upload omitted>${colors.reset}`
     } else if (contentType.toLowerCase().startsWith('multipart/form-data')) {
       bodyInfo = `\n  ${colors.dim}body: <multipart file omitted>${colors.reset}`
     } else {
