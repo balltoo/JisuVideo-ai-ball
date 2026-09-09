@@ -1,8 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import type { PoolConnection } from 'mysql2/promise'
-import { pool } from '../db/index.js'
+import type { Pool, PoolConnection } from 'mysql2/promise'
 import { parseProductionPackage, type ProductionPackagePreview } from './production-package-parser.js'
 import { getProductionPackageSnapshotForConfirm, type ConfirmSnapshot, ProductionPackagePreviewError } from './production-package-preview.js'
 
@@ -22,13 +21,16 @@ const insertId = (result: any) => Number((Array.isArray(result) ? result[0] : re
 const ts = () => new Date().toISOString()
 const json = (value: unknown) => JSON.stringify(value ?? null)
 
-function validateInput(input: ConfirmImportInput) {
-  if (!/^pv_[A-Za-z0-9_-]{8,128}$/.test(input.token)) throw new ProductionPackageImportError('PACKAGE_IMPORT_INVALID', 'preview_token 格式无效')
+export function validateProductionPackageImportInput(input: ConfirmImportInput) {
+  // Preview tokens issued before the Confirm endpoint use a bare 192-bit
+  // Base64URL value; parser-internal tokens use the newer pv_ prefix. Both
+  // are opaque server-side references and must remain valid during upgrade.
+  if (!/^(?:pv_)?[A-Za-z0-9_-]{24,128}$/.test(input.token)) throw new ProductionPackageImportError('PACKAGE_IMPORT_INVALID', 'preview_token 格式无效')
   if (!/^sha256:[0-9a-f]{64}$/.test(input.packageFingerprint) || !/^sha256:[0-9a-f]{64}$/.test(input.validationFingerprint)) throw new ProductionPackageImportError('PACKAGE_IMPORT_INVALID', '指纹格式无效')
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.idempotencyKey)) throw new ProductionPackageImportError('PACKAGE_IMPORT_INVALID', 'idempotency_key 格式无效')
 }
 
-async function existingImport(owner: string, key: string, packageFingerprint: string, validationFingerprint: string) {
+async function existingImport(pool: Pool, owner: string, key: string, packageFingerprint: string, validationFingerprint: string) {
   const [rows] = await pool.query<any[]>('SELECT * FROM production_package_imports WHERE idempotency_owner = ? AND idempotency_key = ? LIMIT 1', [owner, key])
   const row = rows[0]
   if (!row) return undefined
@@ -100,8 +102,11 @@ async function writeImport(connection: PoolConnection, snapshot: ConfirmSnapshot
 }
 
 export async function confirmProductionPackageImport(input: ConfirmImportInput) {
-  validateInput(input)
-  const prior = await existingImport(input.owner, input.idempotencyKey, input.packageFingerprint, input.validationFingerprint)
+  validateProductionPackageImportInput(input)
+  // Do not connect to MySQL merely because the preview router module was
+  // imported. Confirm is the only operation in this module that needs it.
+  const { pool } = await import('../db/index.js')
+  const prior = await existingImport(pool, input.owner, input.idempotencyKey, input.packageFingerprint, input.validationFingerprint)
   if (prior) return prior
   const snapshot = await getProductionPackageSnapshotForConfirm(input.token, input.owner, { packageFingerprint: input.packageFingerprint, validationFingerprint: input.validationFingerprint })
   const bytes = fs.readFileSync(snapshot.uploadPath)
