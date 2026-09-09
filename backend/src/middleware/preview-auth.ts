@@ -22,7 +22,14 @@ const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/
 const NONCE_MIN_BYTES = 16
 const NONCE_MAX_BYTES = 64
-const PREVIEW_PATH_PATTERN = /^\/(?:api\/v1\/)?production-packages\/preview(?:\/[A-Za-z0-9_-]+)?$/
+// 精确端点白名单：method 与路径必须同时匹配，且不做通配（Issue #108）。
+// 修复前 `import/confirm` 不在白名单内，导致 HTTP 导入链路恒 401；
+// 修复只把该端点纳入与 preview 完全相同的可信网关签名模型，不新增浏览器侧签发层。
+const PREVIEW_ENDPOINTS: Array<{ method: string; pattern: RegExp }> = [
+  { method: 'POST', pattern: /^\/(?:api\/v1\/)?production-packages\/preview$/ },
+  { method: 'GET', pattern: /^\/(?:api\/v1\/)?production-packages\/preview\/[A-Za-z0-9_-]+$/ },
+  { method: 'POST', pattern: /^\/(?:api\/v1\/)?production-packages\/import\/confirm$/ },
+]
 
 export type TrustedPreviewIdentity = VerifiedPreviewIdentity & {
   issuedAt: number
@@ -80,9 +87,9 @@ async function verifyTrustedIdentity(c: Parameters<MiddlewareHandler>[0], secret
   const signature = header(c, AUTHENTICATED_SIGNATURE)
   if (!tenantId || !userId || audience !== PREVIEW_AUTH_AUDIENCE || method !== c.req.method || requestPath !== c.req.path || !bodySha256 || !nonce || issuedAt === null || expiresAt === null || !signature) return null
   if (!IDENTITY_FIELD_PATTERN.test(tenantId) || !IDENTITY_FIELD_PATTERN.test(userId)) return null
-  if (!/^[A-Z]{3,10}$/.test(method) || !PREVIEW_PATH_PATTERN.test(requestPath)) return null
-  const isTokenRead = /\/preview\/[A-Za-z0-9_-]+$/.test(requestPath)
-  if (isTokenRead ? method !== 'GET' : method !== 'POST') return null
+  if (!/^[A-Z]{3,10}$/.test(method)) return null
+  const endpoint = PREVIEW_ENDPOINTS.find((candidate) => candidate.method === method && candidate.pattern.test(requestPath))
+  if (!endpoint) return null
   if (!SHA256_HEX_PATTERN.test(bodySha256)) return null
   const nonceBytes = canonicalBase64Url(nonce)
   if (!nonceBytes || nonceBytes.length < NONCE_MIN_BYTES || nonceBytes.length > NONCE_MAX_BYTES) return null

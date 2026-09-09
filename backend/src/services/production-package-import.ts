@@ -40,6 +40,11 @@ async function existingImport(pool: Pool, owner: string, key: string, packageFin
   return { status: 'failed', import_id: Number(row.id), error: row.error_json ? JSON.parse(String(row.error_json)) : null, replayed: true }
 }
 
+/** MySQL 唯一键冲突：表示已有请求持有该幂等键的 claim。 */
+function isDuplicateKeyError(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === 'ER_DUP_ENTRY'
+}
+
 function text(value: unknown) { return typeof value === 'string' ? value.trim() : '' }
 
 async function writeImport(connection: PoolConnection, snapshot: ConfirmSnapshot, parsed: ProductionPackagePreview, importId: number) {
@@ -115,24 +120,38 @@ export async function confirmProductionPackageImport(input: ConfirmImportInput) 
   const reservation = await pool.getConnection()
   try {
     await reservation.beginTransaction()
-    const [insertResult] = await reservation.execute(
-      `INSERT INTO production_package_imports (idempotency_owner, idempotency_key, preview_token, package_fingerprint, validation_fingerprint, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'processing', ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
-      [input.owner, input.idempotencyKey, input.token, input.packageFingerprint, input.validationFingerprint, ts(), ts()],
-    )
-    const [rows] = await reservation.query<any[]>('SELECT * FROM production_package_imports WHERE id = LAST_INSERT_ID() FOR UPDATE')
-    const row = rows[0]
+    let row: any
+    try {
+      const [insertResult] = await reservation.execute(
+        `INSERT INTO production_package_imports (idempotency_owner, idempotency_key, preview_token, package_fingerprint, validation_fingerprint, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'processing', ?, ?)`,
+        [input.owner, input.idempotencyKey, input.token, input.packageFingerprint, input.validationFingerprint, ts(), ts()],
+      )
+      // 原子 claim：INSERT 成功即本请求是唯一 owner。
+      // 不再依赖 ON DUPLICATE KEY UPDATE 的 affectedRows === 1 —— Issue #108 实证该判定
+      // 在并发下不可靠（多个请求拿到同一 import_id 却各自写入业务数据）。
+      ownsReservation = true
+      importId = Number((insertResult as any)?.insertId)
+      const [rows] = await reservation.query<any[]>('SELECT * FROM production_package_imports WHERE id = ?', [importId])
+      row = rows[0]
+    } catch (error) {
+      if (!isDuplicateKeyError(error)) throw error
+      // 未取得 claim：只回放既有记录，**绝不进入 writeImport**。
+      // 只读且不加行锁：claim 的原子性由上面的 INSERT 保证，这里加锁只会造成锁竞争/死锁。
+      const [rows] = await reservation.query<any[]>('SELECT * FROM production_package_imports WHERE idempotency_owner = ? AND idempotency_key = ? LIMIT 1', [input.owner, input.idempotencyKey])
+      row = rows[0]
+      if (!row) throw new ProductionPackageImportError('PACKAGE_IMPORT_FAILED', '无法读取导入幂等记录', 500)
+      importId = Number(row.id)
+      if (String(row.package_fingerprint) !== input.packageFingerprint || String(row.validation_fingerprint) !== input.validationFingerprint) {
+        await reservation.commit()
+        throw new ProductionPackageImportError('PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT', '同一个幂等 key 不能用于另一份生产包', 409)
+      }
+      if (row.status === 'processing') { await reservation.commit(); throw new ProductionPackageImportError('PACKAGE_IMPORT_IN_PROGRESS', '该导入正在处理中，请稍后重试', 409) }
+      if (row.status === 'completed') { await reservation.commit(); return { status: 'completed', drama_id: Number(row.drama_id), import_id: importId, replayed: true } }
+      await reservation.commit()
+      return { status: 'failed', import_id: importId, error: row.error_json ? JSON.parse(String(row.error_json)) : null, replayed: true }
+    }
     if (!row) throw new ProductionPackageImportError('PACKAGE_IMPORT_FAILED', '无法创建导入幂等记录', 500)
     importId = Number(row.id)
-    const insertedHere = Number((insertResult as any)?.affectedRows) === 1
-    if (String(row.package_fingerprint) !== input.packageFingerprint || String(row.validation_fingerprint) !== input.validationFingerprint) {
-      await reservation.commit()
-      reservationCommitted = true
-      throw new ProductionPackageImportError('PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT', '同一个幂等 key 不能用于另一份生产包', 409)
-    }
-    ownsReservation = insertedHere
-    if (!insertedHere && row.status === 'processing') { await reservation.commit(); throw new ProductionPackageImportError('PACKAGE_IMPORT_IN_PROGRESS', '该导入正在处理中，请稍后重试', 409) }
-    if (row.status === 'completed') { await reservation.commit(); return { status: 'completed', drama_id: Number(row.drama_id), import_id: importId, replayed: true } }
-    if (row.status === 'failed') { await reservation.commit(); return { status: 'failed', import_id: importId, error: row.error_json ? JSON.parse(String(row.error_json)) : null, replayed: true } }
     // A connection loss while COMMIT is in flight is ambiguous: MySQL may
     // already have persisted the processing row. Mark the reservation as
     // eligible for the best-effort failed transition before sending COMMIT so
