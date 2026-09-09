@@ -361,3 +361,17 @@ export const assets = mysqlTable('assets', {
   updatedAt: varchar('updated_at', { length: 64 }).notNull(),
   deletedAt: varchar('deleted_at', { length: 64 }),
 })
+
+export const productionPackageImports = mysqlTable('production_package_imports', {
+  id: int('id').primaryKey().autoincrement(),
+  idempotencyOwner: varchar('idempotency_owner', { length: 512 }).notNull(),
+  idempotencyKey: varchar('idempotency_key', { length: 128 }).notNull(),
+  previewToken: varchar('preview_token', { length: 64 }).notNull(),
+  packageFingerprint: varchar('package_fingerprint', { length: 128 }).notNull(),
+  validationFingerprint: varchar('validation_fingerprint', { length: 128 }).notNull(),
+  status: varchar('status', { length: 32 }).notNull(),
+  dramaId: int('drama_id'),
+  errorJson: longtext('error_json'),
+  createdAt: varchar('created_at', { length: 64 }).notNull(),
+  updatedAt: varchar('updated_at', { length: 64 }).notNull(),
+})

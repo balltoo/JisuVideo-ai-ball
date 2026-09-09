@@ -351,6 +351,22 @@ export const mysqlSchemaStatements = [
     preview_json LONGTEXT NOT NULL,
     INDEX idx_preview_package_snapshots_expiry (expires_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS production_package_imports (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    idempotency_owner VARCHAR(512) NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    preview_token VARCHAR(64) NOT NULL,
+    package_fingerprint VARCHAR(128) NOT NULL,
+    validation_fingerprint VARCHAR(128) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    drama_id INT,
+    error_json LONGTEXT,
+    created_at VARCHAR(64) NOT NULL,
+    updated_at VARCHAR(64) NOT NULL,
+    UNIQUE KEY uq_production_package_import_key (idempotency_owner, idempotency_key),
+    INDEX idx_production_package_import_token (preview_token),
+    INDEX idx_production_package_import_drama (drama_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ]
 
 /**

@@ -50,6 +50,8 @@ type Snapshot = {
   preview: ProductionPackagePreview
 }
 
+export type ConfirmSnapshot = Snapshot & { uploadPath: string }
+
 const snapshots = new Map<string, Snapshot>()
 const SNAPSHOT_METADATA = 'snapshot.json'
 
@@ -301,6 +303,27 @@ async function loadSnapshotFromMySql(token: string): Promise<Snapshot | undefine
       preview,
     }
   } catch { return undefined }
+}
+
+/** Load the shared snapshot and re-check the immutable upload before import. */
+export async function getProductionPackageSnapshotForConfirm(token: string, owner: string, expected: { packageFingerprint: string; validationFingerprint: string }): Promise<ConfirmSnapshot> {
+  const snapshot = useMySqlSnapshotStore() ? await loadSnapshotFromMySql(token) : snapshots.get(token)
+  if (!snapshot) throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_NOT_FOUND', '预览不存在或已被清理', 404)
+  if (snapshot.expiresAt <= Date.now()) {
+    await removeSnapshot(snapshot)
+    throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_EXPIRED', '预览已过期，请重新上传', 410)
+  }
+  if (snapshot.owner !== owner) throw new ProductionPackagePreviewError('PACKAGE_PREVIEW_NOT_FOUND', '预览不存在', 404)
+  if (snapshot.packageFingerprint !== expected.packageFingerprint || snapshot.validationFingerprint !== expected.validationFingerprint) {
+    throw new ProductionPackagePreviewError('PACKAGE_SNAPSHOT_MISMATCH', '预览指纹已变化，请重新上传并预览', 409)
+  }
+  const uploadPath = path.resolve(snapshot.snapshotDirectory, 'upload.zip')
+  if (!uploadPath.startsWith(`${path.resolve(snapshot.snapshotDirectory)}${path.sep}`) || !fs.existsSync(uploadPath)) {
+    throw new ProductionPackagePreviewError('PACKAGE_SNAPSHOT_MISMATCH', '预览文件已不存在，请重新上传', 409)
+  }
+  const digest = crypto.createHash('sha256').update(fs.readFileSync(uploadPath)).digest('hex')
+  if (digest !== snapshot.uploadSha256) throw new ProductionPackagePreviewError('PACKAGE_SNAPSHOT_MISMATCH', '预览文件已被替换，请重新上传', 409)
+  return { ...snapshot, uploadPath }
 }
 
 async function removeSnapshot(snapshot: Snapshot): Promise<void> {

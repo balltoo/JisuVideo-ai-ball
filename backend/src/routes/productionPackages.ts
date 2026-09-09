@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { success } from '../utils/response.js'
 import { createProductionPackagePreview, getProductionPackagePreviewShared, ProductionPackagePreviewError, PREVIEW_LIMITS } from '../services/production-package-preview.js'
+import { confirmProductionPackageImport, ProductionPackageImportError } from '../services/production-package-import.js'
 import { MAX_PREVIEW_REQUEST_BYTES } from '../middleware/preview-request-body.js'
 
 export type VerifiedPreviewIdentity = {
@@ -31,6 +32,7 @@ function ownerOf(identity: VerifiedPreviewIdentity): string {
 }
 
 function previewError(c: any, error: unknown) {
+  if (error instanceof ProductionPackageImportError) return c.json({ code: error.code, severity: 'error', message: error.message, details: error.details }, error.status)
   if (error instanceof ProductionPackagePreviewError) return c.json({ code: error.code, severity: 'error', message: error.message }, error.status)
   console.error('[production-package-preview]', error)
   return c.json({ code: 'PACKAGE_ARCHIVE_INVALID', severity: 'error', message: '生产包无法处理，请重新导出后再试' }, 400)
@@ -65,6 +67,22 @@ export function createProductionPackagesRouter(resolveIdentity: PreviewIdentityR
       const identity = resolveIdentity(c)
       if (!identity) return c.json({ code: 'PACKAGE_PREVIEW_UNAUTHORIZED', severity: 'error', message: '需要已验证的登录身份' }, 401)
       return success(c, await getProductionPackagePreviewShared(c.req.param('token'), ownerOf(identity)))
+    } catch (error) { return previewError(c, error) }
+  })
+
+  app.post('/import/confirm', async (c) => {
+    try {
+      const identity = resolveIdentity(c)
+      if (!identity) return c.json({ code: 'PACKAGE_PREVIEW_UNAUTHORIZED', severity: 'error', message: '需要已验证的登录身份' }, 401)
+      const body = await c.req.json().catch(() => ({}))
+      const result = await confirmProductionPackageImport({
+        token: String(body.preview_token || ''),
+        owner: ownerOf(identity),
+        packageFingerprint: String(body.package_fingerprint || ''),
+        validationFingerprint: String(body.validation_fingerprint || ''),
+        idempotencyKey: String(body.idempotency_key || ''),
+      })
+      return success(c, result)
     } catch (error) { return previewError(c, error) }
   })
 
