@@ -133,8 +133,12 @@ export async function confirmProductionPackageImport(input: ConfirmImportInput) 
     if (!insertedHere && row.status === 'processing') { await reservation.commit(); throw new ProductionPackageImportError('PACKAGE_IMPORT_IN_PROGRESS', '该导入正在处理中，请稍后重试', 409) }
     if (row.status === 'completed') { await reservation.commit(); return { status: 'completed', drama_id: Number(row.drama_id), import_id: importId, replayed: true } }
     if (row.status === 'failed') { await reservation.commit(); return { status: 'failed', import_id: importId, error: row.error_json ? JSON.parse(String(row.error_json)) : null, replayed: true } }
-    await reservation.commit()
+    // A connection loss while COMMIT is in flight is ambiguous: MySQL may
+    // already have persisted the processing row. Mark the reservation as
+    // eligible for the best-effort failed transition before sending COMMIT so
+    // that this case cannot strand the idempotency key in processing forever.
     reservationCommitted = true
+    await reservation.commit()
     const reparsed = await extractProductionPackageUploadForConfirm(bytes)
     try {
       const parsed = reparsed.preview
