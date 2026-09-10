@@ -31,7 +31,7 @@ process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE = 'mysql'
 process.env.PREVIEW_AUTH_NONCE_STORE = 'mysql'
 process.env.PREVIEW_REQUEST_RESOURCE_STORE = 'mysql'
 
-const { app } = await import('../src/index.ts')
+const { app, createApi } = await import('../src/index.ts')
 const { signPreviewIdentity, PREVIEW_AUTH_AUDIENCE } = await import('../src/middleware/preview-auth.ts')
 
 const FIXTURE_PACKAGE = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
@@ -117,6 +117,58 @@ test('修复 1：HTTP Confirm 现在可以成功创建项目（修复前恒 401�
   const created = await app.fetch(new Request(`http://localhost/api/v1/dramas/${confirm.body.data.drama_id}`))
   console.log('[fix-1] query drama =', created.status)
   assert.equal(created.status, 200, '创建结果应可通过既有接口查询')
+})
+
+test('Issue #112：本地可信会话以普通 HTTP 完成 Preview → Confirm，客户端身份头不生效', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const previousMode = process.env.PREVIEW_AUTH_MODE
+  const previousSessionSecret = process.env.PREVIEW_LOCAL_SESSION_SECRET
+  process.env.PREVIEW_AUTH_MODE = 'local-session'
+  process.env.PREVIEW_LOCAL_SESSION_SECRET = SECRET
+  const localApi = createApi()
+  try {
+    const form = new FormData()
+    form.set('file', new File([await zipDirectory(FIXTURE_PACKAGE)], 'fixture-rain-lantern.zip'))
+    const previewResponse = await localApi.fetch(new Request('http://localhost/production-packages/preview', {
+      method: 'POST',
+      headers: {
+        origin: 'http://localhost:3013',
+        'x-authenticated-tenant-id': 'forged-tenant',
+        'x-authenticated-user-id': 'forged-user',
+      },
+      body: form,
+    }))
+    if (previewResponse.status !== 200) assert.fail(await previewResponse.text())
+    assert.equal(previewResponse.status, 200)
+    const cookie = previewResponse.headers.get('set-cookie')?.split(';', 1)[0]
+    assert.ok(cookie, '本地会话必须由服务端签发 HttpOnly cookie')
+    const preview = await previewResponse.json()
+    const key = `local-session-${crypto.randomUUID()}`
+    usedKeys.add(key)
+
+    const confirmResponse = await localApi.fetch(new Request('http://localhost/production-packages/import/confirm', {
+      method: 'POST',
+      headers: {
+        origin: 'http://localhost:3013',
+        cookie,
+        'content-type': 'application/json',
+        'x-authenticated-tenant-id': 'forged-other-tenant',
+        'x-authenticated-user-id': 'forged-other-user',
+      },
+      body: confirmBody(preview.data.preview_token, preview.data, key),
+    }))
+    if (confirmResponse.status !== 200) assert.fail(await confirmResponse.text())
+    assert.equal(confirmResponse.status, 200)
+    const confirmed = await confirmResponse.json()
+    assert.equal(confirmed.data.status, 'completed')
+    assert.equal(confirmed.data.replayed, false)
+    createdDramaIds.add(confirmed.data.drama_id)
+  } finally {
+    if (previousMode === undefined) delete process.env.PREVIEW_AUTH_MODE
+    else process.env.PREVIEW_AUTH_MODE = previousMode
+    if (previousSessionSecret === undefined) delete process.env.PREVIEW_LOCAL_SESSION_SECRET
+    else process.env.PREVIEW_LOCAL_SESSION_SECRET = previousSessionSecret
+  }
 })
 
 test('修复 1 回归：白名单仍然收敛（method 与路径必须精确匹配）', async (t) => {

@@ -38,6 +38,8 @@ services:
     environment:
       NODE_ENV: development
       PORT: "5679"
+      # 本地开发使用进程内临时会话密钥；浏览器不接触签名密钥。
+      PREVIEW_AUTH_MODE: local-session
       DATABASE_URL: mysql://huobao:huobao@mysql:3306/huobao_drama
       STORAGE_PATH: /workspace/data/static
       # 浏览器来源白名单（逗号分隔）

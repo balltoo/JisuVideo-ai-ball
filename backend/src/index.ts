@@ -28,6 +28,7 @@ import { recoverInterruptedTasks } from './services/recovery.js'
 import { startStorageCleanup } from './utils/cleanup.js'
 import { startProductionPackagePreviewCleanup } from './services/production-package-preview.js'
 import { createPreviewSessionAuth } from './middleware/preview-auth.js'
+import { createLocalPreviewSessionAuth } from './middleware/preview-local-session.js'
 import { previewRequestBodyLimit } from './middleware/preview-request-body.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -78,9 +79,20 @@ export function createApi(previewAuthSecret = process.env.PREVIEW_AUTH_PROXY_SEC
   // This stream guard must run before auth: unauthenticated chunked uploads
   // must be bounded and hashed before any identity verification.
   api.use('/production-packages/*', previewRequestBodyLimit())
-  // Production-package previews require a server-verified signed session. The
-  // router itself only consumes the identity placed in Hono context here.
-  api.use('/production-packages/*', createPreviewSessionAuth(previewAuthSecret))
+  // Local single-user deployments authenticate the browser with a server-side
+  // HttpOnly session. External deployments retain the existing trusted gateway
+  // HMAC assertions. The router only consumes the verified context identity.
+  const authMode = process.env.PREVIEW_AUTH_MODE || 'gateway'
+  if (authMode === 'local-session') {
+    api.use('/production-packages/*', createLocalPreviewSessionAuth(
+      process.env.PREVIEW_LOCAL_SESSION_SECRET || previewAuthSecret,
+      { allowedOrigins: corsOrigins, secureCookie: process.env.PREVIEW_LOCAL_SESSION_COOKIE_SECURE === 'true' },
+    ))
+  } else if (authMode === 'gateway') {
+    api.use('/production-packages/*', createPreviewSessionAuth(previewAuthSecret))
+  } else {
+    throw new Error('PREVIEW_AUTH_MODE must be gateway or local-session')
+  }
   api.route('/production-packages', productionPackages)
   return api
 }

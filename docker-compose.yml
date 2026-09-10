@@ -34,8 +34,12 @@ services:
       - NODE_ENV=production
       - PORT=5679
       - DATABASE_URL=mysql://huobao:huobao@mysql:3306/huobao_drama
-      # 由部署平台/secret manager 注入，不能提交到仓库；网关签名端必须使用同一值
-      - PREVIEW_AUTH_PROXY_SECRET=${PREVIEW_AUTH_PROXY_SECRET:?Set PREVIEW_AUTH_PROXY_SECRET via the deployment secret manager}
+      # 本地单用户默认使用服务端 HttpOnly 会话；密钥仅留在容器内，不会发送给浏览器。
+      # 若部署到外部可信网关，改 PREVIEW_AUTH_MODE=gateway 并配置 PREVIEW_AUTH_PROXY_SECRET。
+      - PREVIEW_AUTH_MODE=local-session
+      - PREVIEW_LOCAL_SESSION_SECRET=${PREVIEW_LOCAL_SESSION_SECRET:?Set PREVIEW_LOCAL_SESSION_SECRET via the deployment secret manager}
+      # gateway 模式才使用；local-session 下保持为空，不会进入浏览器或日志。
+      - PREVIEW_AUTH_PROXY_SECRET=${PREVIEW_AUTH_PROXY_SECRET:-}
       # 预览请求资源预算：最多 8 个并发 spool，总临时容量 208 MiB；lease 存在 MySQL
       - PREVIEW_REQUEST_MAX_CONCURRENT=8
       - PREVIEW_REQUEST_MAX_SPOOL_BYTES=218103808

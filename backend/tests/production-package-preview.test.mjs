@@ -662,13 +662,15 @@ test('MySQL 快照索引让另一后端进程可读取同一预览，并保持�
   }
 })
 
-test('生产 Compose 注入密钥且实际 API 装配在缺密钥时关闭、有效断言时可用', async () => {
+test('生产 Compose 默认采用本地可信会话，网关模式仍在缺密钥时关闭', async () => {
   process.env.NODE_ENV = 'test'
   process.env.MYSQL_NO_INIT = '1'
   process.env.PREVIEW_AUTH_PROXY_SECRET = integrationSecret
   const { app, createApi } = await import('../src/index.ts')
   const compose = fs.readFileSync(path.join(path.dirname(fixtureRoot), '..', '..', '..', '..', '..', 'docker-compose.yml'), 'utf8')
-  assert.match(compose, /PREVIEW_AUTH_PROXY_SECRET=\$\{PREVIEW_AUTH_PROXY_SECRET:\?\S[\s\S]*secret manager\}/)
+  assert.match(compose, /PREVIEW_AUTH_MODE=local-session/)
+  assert.match(compose, /PREVIEW_LOCAL_SESSION_SECRET=\$\{PREVIEW_LOCAL_SESSION_SECRET:\?\S[\s\S]*secret manager\}/)
+  assert.match(compose, /PREVIEW_AUTH_PROXY_SECRET=\$\{PREVIEW_AUTH_PROXY_SECRET:-\}/)
   assert.match(compose, /deploy:\s+replicas:\s+1/)
   assert.match(compose, /PREVIEW_AUTH_NONCE_STORE=mysql/)
   assert.match(compose, /PREVIEW_REQUEST_RESOURCE_STORE=mysql/)
