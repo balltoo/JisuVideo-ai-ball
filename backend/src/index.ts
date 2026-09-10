@@ -85,7 +85,7 @@ export function createApi(previewAuthSecret = process.env.PREVIEW_AUTH_PROXY_SEC
   const authMode = process.env.PREVIEW_AUTH_MODE || 'gateway'
   if (authMode === 'local-session') {
     api.use('/production-packages/*', createLocalPreviewSessionAuth(
-      process.env.PREVIEW_LOCAL_SESSION_SECRET || previewAuthSecret,
+      process.env.PREVIEW_LOCAL_SESSION_SECRET,
       { allowedOrigins: corsOrigins, secureCookie: process.env.PREVIEW_LOCAL_SESSION_COOKIE_SECURE === 'true' },
     ))
   } else if (authMode === 'gateway') {

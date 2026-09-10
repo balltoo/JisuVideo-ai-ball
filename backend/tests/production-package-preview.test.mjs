@@ -26,6 +26,7 @@ import {
 import { canonicalSourceFromPackage } from '../src/services/production-package-parser.ts'
 import productionPackages, { createProductionPackagesRouter } from '../src/routes/productionPackages.ts'
 import { createPreviewSessionAuth, signPreviewIdentity, PREVIEW_AUTH_AUDIENCE, PREVIEW_AUTH_MAX_AGE_MS } from '../src/middleware/preview-auth.ts'
+import { createLocalPreviewSessionAuth } from '../src/middleware/preview-local-session.ts'
 import { previewRequestBodyLimit } from '../src/middleware/preview-request-body.ts'
 import { consumePreviewNonce, previewNonceStorePath } from '../src/middleware/preview-nonce-store.ts'
 import { requestLogger } from '../src/middleware/logger.ts'
@@ -691,4 +692,57 @@ test('生产 Compose 默认采用本地可信会话，网关模式仍在缺密�
 
   const configured = await signedRequest(app, '/api/v1/production-packages/preview', { body: form })
   assert.equal(configured.status, 200)
+
+  const previousMode = process.env.PREVIEW_AUTH_MODE
+  const previousLocalSecret = process.env.PREVIEW_LOCAL_SESSION_SECRET
+  try {
+    process.env.PREVIEW_AUTH_MODE = 'local-session'
+    delete process.env.PREVIEW_LOCAL_SESSION_SECRET
+    const localMissingSecret = await createApi(integrationSecret).fetch(new Request('http://localhost/production-packages/preview', {
+      method: 'POST', headers: { origin: 'http://localhost:3013' }, body: form,
+    }))
+    assert.equal(localMissingSecret.status, 503)
+    assert.equal((await localMissingSecret.json()).code, 'PACKAGE_PREVIEW_AUTH_UNAVAILABLE')
+  } finally {
+    if (previousMode === undefined) delete process.env.PREVIEW_AUTH_MODE
+    else process.env.PREVIEW_AUTH_MODE = previousMode
+    if (previousLocalSecret === undefined) delete process.env.PREVIEW_LOCAL_SESSION_SECRET
+    else process.env.PREVIEW_LOCAL_SESSION_SECRET = previousLocalSecret
+  }
+})
+
+test('local-session 同时配置两种密钥时仅接受本地会话密钥', async () => {
+  const { createApi } = await import('../src/index.ts')
+  const localSecret = Buffer.alloc(32, 8).toString('base64url')
+  const proxySecret = Buffer.alloc(32, 9).toString('base64url')
+  const previousMode = process.env.PREVIEW_AUTH_MODE
+  const previousLocalSecret = process.env.PREVIEW_LOCAL_SESSION_SECRET
+  try {
+    process.env.PREVIEW_AUTH_MODE = 'local-session'
+    process.env.PREVIEW_LOCAL_SESSION_SECRET = localSecret
+    const localApi = createApi(proxySecret)
+    const form = new FormData()
+    form.set('file', new File([await zipEntries(fixtureEntries())], 'fixture.zip'))
+    const issued = await localApi.fetch(new Request('http://localhost/production-packages/preview', {
+      method: 'POST', headers: { origin: 'http://localhost:3013' }, body: form,
+    }))
+    assert.equal(issued.status, 200)
+    const cookie = issued.headers.get('set-cookie')?.split(';', 1)[0]
+    assert.ok(cookie)
+
+    const localProbe = new Hono()
+    localProbe.use('/production-packages/*', createLocalPreviewSessionAuth(localSecret, { allowedOrigins: ['http://localhost:3013'] }))
+    localProbe.post('/production-packages/preview', c => c.text('ok'))
+    const proxyProbe = new Hono()
+    proxyProbe.use('/production-packages/*', createLocalPreviewSessionAuth(proxySecret, { allowedOrigins: ['http://localhost:3013'] }))
+    proxyProbe.post('/production-packages/preview', c => c.text('ok'))
+    const request = { method: 'POST', headers: { origin: 'http://localhost:3013', cookie } }
+    assert.equal((await localProbe.request('/production-packages/preview', request)).status, 200)
+    assert.equal((await proxyProbe.request('/production-packages/preview', request)).status, 401)
+  } finally {
+    if (previousMode === undefined) delete process.env.PREVIEW_AUTH_MODE
+    else process.env.PREVIEW_AUTH_MODE = previousMode
+    if (previousLocalSecret === undefined) delete process.env.PREVIEW_LOCAL_SESSION_SECRET
+    else process.env.PREVIEW_LOCAL_SESSION_SECRET = previousLocalSecret
+  }
 })

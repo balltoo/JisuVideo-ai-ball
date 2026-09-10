@@ -55,8 +55,23 @@ test('本地会话：同一签名 cookie 稳定复用身份，篡改 cookie fail
   assert.equal((await tampered.json()).code, 'PACKAGE_PREVIEW_UNAUTHORIZED')
 })
 
-test('本地会话：拒绝非回环来源，生产模式缺密钥 fail closed', async () => {
+test('本地会话：不同会话密钥不可互认，网关密钥不能签发本地会话', async () => {
+  const localSecret = crypto.randomBytes(32).toString('base64url')
+  const proxySecret = crypto.randomBytes(32).toString('base64url')
+  const proxyApp = createApp(proxySecret)
+  const proxyResponse = await proxyApp.request('/production-packages/preview', { method: 'POST', headers: { origin: 'http://localhost:3013' } })
+  const proxyCookie = proxyResponse.headers.get('set-cookie')?.split(';')[0]
+  assert.ok(proxyCookie)
+  const localApp = createApp(localSecret)
+  const rejected = await localApp.request('/production-packages/preview', { method: 'POST', headers: { origin: 'http://localhost:3013', cookie: proxyCookie } })
+  assert.equal(rejected.status, 401)
+})
+
+test('本地会话：拒绝无 Origin 与非回环来源，生产模式缺密钥 fail closed', async () => {
   const app = createApp()
+  const originless = await app.request('/production-packages/preview', { method: 'POST' })
+  assert.equal(originless.status, 403)
+  assert.equal((await originless.json()).code, 'PACKAGE_PREVIEW_FORBIDDEN')
   const rejected = await app.request('/production-packages/preview', { method: 'POST', headers: { origin: 'https://example.com' } })
   assert.equal(rejected.status, 403)
   assert.equal((await rejected.json()).code, 'PACKAGE_PREVIEW_FORBIDDEN')

@@ -27,9 +27,9 @@ function configuredSecret(secret: string | undefined): string | null {
 }
 
 function isAllowedLocalOrigin(origin: string | undefined, allowedOrigins: readonly string[]): boolean {
-  // Non-browser integration clients have no Origin. They still need a valid
-  // HttpOnly cookie and cannot impersonate another session from headers.
-  if (!origin) return true
+  // Browser-facing local-session is deliberately Origin-bound. Integrations
+  // without an Origin must use the explicit trusted-gateway mode instead.
+  if (!origin) return false
   if (!allowedOrigins.includes(origin)) return false
   try { return LOCAL_ORIGIN_HOSTS.has(new URL(origin).hostname) } catch { return false }
 }
