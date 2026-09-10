@@ -48,10 +48,18 @@ node --import tsx/esm --test --test-force-exit tests/production-package-import-f
 | R6 | Confirm 写入阶段失败 | 服务层 | `500 PACKAGE_IMPORT_FAILED`；幂等行收口 `failed` 且 `error_json` 可诊断；`dramas +0`；同 key 重放恒 `failed`；换 key 重试 `completed` | 通过（含 1 项语义待确认，见 §3） |
 | R7 | 数据清洁（成功路径） | 服务层 | `episodes/characters/scenes = 2/2/2`（与包一致）；`source_versions = 1`；孤儿 `episode_characters`、`episode_scenes` 均为 0 | 通过 |
 | R8 | Preview 租约与清理边界 | 服务层 | 过期快照回收 8 行、残留 0；孤儿目录回收 1 个 | 通过 |
+| M1 | `target_mode` 四项逻辑身份（契约 §5.2/§5.3） | — | **未覆盖**：Confirm 链路无 `target_mode` 输入，`production_package_imports` 无该列 | **未覆盖（阻塞）** |
 | T1 | `npm run typecheck` | — | 通过 | — |
 | T2 | `npm test`（全量，真实 MySQL） | — | **280 / 280 通过，0 fail，0 skipped** | — |
 
 > 上表为缺陷发现时的实测（基线 `6384cec`）；A3/R3 对应两个缺陷。修复后健康目标复验见 §6。
+>
+> **契约验收范围的诚实边界（M1）**：契约 §5.2/§5.3 要求的四项逻辑身份
+> `confirm_idempotency_key + package_fingerprint + validation_fingerprint + target_mode`
+> 在本报告对应的实现中**只有前两项被纳入比对**；`target_mode` 未进入 Confirm 链路
+> （`ConfirmImportInput` 无该字段、`production_package_imports` 无该列、错误码也未使用
+> 契约定义的 `IDEMPOTENCY_KEY_REUSED`）。因此本报告**不能**被读作"含 `target_mode` 的
+> 契约验收已完成"。该缺口已拆出为独立阻塞任务，见 §6「遗留待办」。
 
 ## 3. 发现的两个 P0 缺陷
 
@@ -115,5 +123,12 @@ node --import tsx/esm --test --test-force-exit tests/production-package-import-f
 
 ### 遗留待办
 
-- "可信网关/BFF 如何代表浏览器签名"的接线（Issue #112，主账号认领中）不是本修复范围。
+- "**可信网关/BFF 如何代表浏览器签名**"的接线（Issue #112，主账号认领中）不是本修复范围。
 - 失败后同 key 恒定重放 `failed` 语义已确认可接受；前端（#107）需在失败时引导用户"重新上传/重新发起"（新 key）。
+- **`target_mode` 四项逻辑身份（阻塞，见 §2 M1）**：契约 §5.2/§5.3 要求的
+  `confirm_idempotency_key + package_fingerprint + validation_fingerprint + target_mode`
+  目前只实现了前两项比对；`target_mode` 未进入 `ConfirmImportInput`、
+  `production_package_imports` schema 与身份比对，"不支持的 target mode 阻断"也不存在。
+  该任务需要改 `backend/src/**`（类型、服务实现、`mysql-schema.ts` 迁移与存量回填），
+  超出本 PR 声明的修改范围，已拆出为独立阻塞任务单独推进；在其落地前，
+  本报告的验收范围**不含**含 `target_mode` 的契约语义。
