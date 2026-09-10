@@ -1,17 +1,19 @@
 /**
- * Issue #108 / P0：生产包导入 HTTP 级端到端可靠性验收（主链路探测版）
+ * Issue #108 / P0：生产包导入 HTTP 级端到端验收（健康目标版）
  *
- * 契约与基线：docs/production-package-zip-transport-v0.1.md，master 6384cec（PR #106 后）
- * 覆盖（逐步补齐，见 docs/production-package-import-reliability-acceptance.md）：
- *   签名身份 → ZIP Preview → 获取 Preview → Confirm → 查询创建结果
+ * 依赖：fix(#108) 已合入 master（preview-auth 精确白名单 + import 原子 claim）。
+ * 断言为健康目标：HTTP Confirm 必须成功创建项目、幂等重放必须返回同一结果。
  *
- * 环境前提（不写死凭据与本机路径，全部走环境变量）：
- *   MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE（或 DATABASE_URL）
- *   未配置 MySQL 时，**仅**本文件的数据库段按仓库既有约定 skip（CI 提供 mysql:8.0 service）。
- * 生产拓扑开关（与 docker-compose.yml 一致）：
- *   PREVIEW_PACKAGE_SNAPSHOT_STORE=mysql、PREVIEW_AUTH_NONCE_STORE=mysql、PREVIEW_REQUEST_RESOURCE_STORE=mysql
+ * 覆盖：
+ *   A1 签名身份 → ZIP Preview（200）→ 获取 Preview（200）→ Confirm（200 completed）→ 查询创建结果
+ *   A2 HTTP 幂等重放：同 key 第二次 Confirm → 200 completed + replayed:true + 同一 drama_id，dramas +1
  *
- * 运行：cd backend && node --import tsx/esm --test tests/production-package-import-e2e.test.mjs
+ * 服务层可靠性矩阵（并发/快照过期与篡改/失败收口/数据清洁/清理）见
+ * production-package-import-reliability.test.mjs；历史缺陷证据见
+ * docs/production-package-import-reliability-acceptance.md。
+ *
+ * 环境：MYSQL_* 或 DATABASE_URL；未配置 MySQL 时按仓库既有约定 skip（CI 提供 mysql:8.0 service）。
+ * 运行：cd backend && node --import tsx/esm --test --test-force-exit tests/production-package-import-e2e.test.mjs
  */
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -22,26 +24,29 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import yazl from 'yazl'
 import * as helpers from './fixtures/production-package/helpers.mjs'
+import { prepareIsolatedMySql } from './fixtures/production-package/mysql-isolate.mjs'
 
-// 必须在动态 import 任何 ../src/** 之前设置（db/index.ts 顶层 initDb 会建表）
 process.env.NODE_ENV = 'test'
 process.env.MYSQL_NO_INIT = '1'
 
 const SECRET = Buffer.alloc(32, 7).toString('base64url')
 process.env.PREVIEW_AUTH_PROXY_SECRET = SECRET
 const snapshotRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jisu-pp-e2e-snapshot-'))
-const reservationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jisu-pp-e2e-reservation-'))
 process.env.PREVIEW_SNAPSHOT_ROOT = snapshotRoot
-process.env.PREVIEW_REQUEST_RESERVATION_PATH = reservationRoot
 process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE = 'mysql'
 process.env.PREVIEW_AUTH_NONCE_STORE = 'mysql'
 process.env.PREVIEW_REQUEST_RESOURCE_STORE = 'mysql'
 
+// 先建唯一隔离库并把 MYSQL_DATABASE 指向它，再加载 app，避免与其它真实 MySQL
+// 测试文件在 npm test 并发运行时互相污染（Issue #108 实测教训）。
+const hasMySql = Boolean(process.env.MYSQL_HOST || process.env.DATABASE_URL)
+const isolated = hasMySql ? await prepareIsolatedMySql('jisu_pp_e2e') : null
 const { app } = await import('../src/index.ts')
 const { signPreviewIdentity, PREVIEW_AUTH_AUDIENCE } = await import('../src/middleware/preview-auth.ts')
 
 const FIXTURE_PACKAGE = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
 const createdDramaIds = new Set()
+const usedKeys = new Set()
 
 function zipDirectory(root) {
   const archive = new yazl.ZipFile()
@@ -88,90 +93,63 @@ const call = async (pathname, options) => {
   return { status: response.status, body: await response.json().catch(() => null) }
 }
 
-async function previewPackage(tenantId = 'tenant-e2e', userId = 'user-e2e') {
+async function previewPackage(userId = 'user-e2e') {
   const form = new FormData()
   form.set('file', new File([await zipDirectory(FIXTURE_PACKAGE)], 'fixture-rain-lantern.zip'))
-  return call('/api/v1/production-packages/preview', { body: form, tenantId, userId })
+  return call('/api/v1/production-packages/preview', { body: form, userId })
 }
 
-const hasMySql = Boolean(process.env.MYSQL_HOST || process.env.DATABASE_URL)
-
-test('HTTP 主链路：Preview → 获取 Preview → Confirm（探测签名路径是否可达）', async (t) => {
-  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
-  const preview = await previewPackage()
-  console.log('[e2e] preview status =', preview.status, 'code =', preview.body?.code, 'can_confirm =', preview.body?.data?.can_confirm)
-  assert.equal(preview.status, 200, `preview 失败: ${JSON.stringify(preview.body)}`)
-  const token = preview.body.data.preview_token
-  const read = await call(`/api/v1/production-packages/preview/${token}`, { method: 'GET' })
-  console.log('[e2e] get preview status =', read.status, 'code =', read.body?.code)
-  assert.equal(read.status, 200)
-
-  const confirm = await call('/api/v1/production-packages/import/confirm', {
-    body: JSON.stringify({
-      preview_token: token,
-      package_fingerprint: preview.body.data.package.package_fingerprint,
-      validation_fingerprint: preview.body.data.package.validation_fingerprint,
-      idempotency_key: `e2e-probe-${crypto.randomUUID()}`,
-    }),
-  })
-  console.log('[e2e] confirm status =', confirm.status, 'code =', confirm.body?.code, 'message =', confirm.body?.message)
-  // 已知缺陷（Issue #108 验收发现，待主账号确认热点锁后最小修复）：
-  // 签名身份中间件 preview-auth.ts 的 PREVIEW_PATH_PATTERN 只覆盖
-  // /production-packages/preview[/token]，不含 /production-packages/import/confirm，
-  // 因此 Confirm 在 HTTP 层恒定 401（认证层拒绝，未进入业务层）。
-  // 修复后本断言需改为 200 + status === 'completed'。
-  assert.equal(confirm.status, 401, `confirm 现状与预期不符（缺陷可能已修复，请更新断言）: ${JSON.stringify(confirm.body)}`)
-  assert.equal(confirm.body.code, 'PACKAGE_PREVIEW_UNAUTHORIZED')
+const confirmPayload = (preview, key, token) => JSON.stringify({
+  preview_token: token,
+  package_fingerprint: preview.package.package_fingerprint,
+  validation_fingerprint: preview.package.validation_fingerprint,
+  idempotency_key: key,
 })
 
-test('缺陷定位对照：服务层直连同一包可完成导入（证明 401 仅在认证层，业务逻辑本身可用）', async (t) => {
+test('A1 HTTP 完整成功路径：Preview → 获取 Preview → Confirm → 查询创建结果', async (t) => {
   if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
-  const { createProductionPackagePreview } = await import('../src/services/production-package-preview.ts')
-  const { confirmProductionPackageImport } = await import('../src/services/production-package-import.ts')
-  const tenantId = 'tenant-e2e'
-  const userId = 'user-e2e-service'
-  const owner = JSON.stringify([tenantId, userId])
-  const zip = await zipDirectory(FIXTURE_PACKAGE)
-  const preview = await createProductionPackagePreview({ zip, owner })
-  assert.equal(preview.can_confirm, true, 'fixture 包应可作为可确认预览')
-  const result = await confirmProductionPackageImport({
-    token: preview.preview_token,
-    owner,
-    packageFingerprint: preview.package.package_fingerprint,
-    validationFingerprint: preview.package.validation_fingerprint,
-    idempotencyKey: `e2e-service-${crypto.randomUUID()}`,
-  })
-  console.log('[e2e] service confirm =', JSON.stringify({ status: result.status, dramaId: result.drama_id, replayed: result.replayed }))
-  assert.equal(result.status, 'completed')
-  assert.equal(result.replayed, false)
-  createdDramaIds.add(result.drama_id)
+  const userId = 'user-e2e-a1'
+  const preview = await previewPackage(userId)
+  assert.equal(preview.status, 200, `preview 失败: ${JSON.stringify(preview.body)}`)
+  assert.equal(preview.body.data.can_confirm, true, 'fixture 包应可确认')
+  const token = preview.body.data.preview_token
 
-  // 静态定位：认证层路径白名单不含 import/confirm
-  const authSource = fs.readFileSync(path.join(process.cwd(), 'src', 'middleware', 'preview-auth.ts'), 'utf8')
-  const patternLine = /const PREVIEW_PATH_PATTERN = [^\n]+/.exec(authSource)?.[0] ?? ''
-  console.log('[e2e] PREVIEW_PATH_PATTERN =', patternLine)
-  assert.match(patternLine, /production-packages\\\/preview/, '路径白名单应仅覆盖 preview（缺陷根因待修复后更新）')
+  const read = await call(`/api/v1/production-packages/preview/${token}`, { method: 'GET', userId })
+  assert.equal(read.status, 200, `获取 preview 失败: ${JSON.stringify(read.body)}`)
+
+  const key = `e2e-a1-${crypto.randomUUID()}`
+  usedKeys.add(key)
+  const confirm = await call('/api/v1/production-packages/import/confirm', { body: confirmPayload(preview.body.data, key, token), userId })
+  console.log('[A1]', JSON.stringify({ status: confirm.status, code: confirm.body?.code, data: confirm.body?.data }))
+  assert.equal(confirm.status, 200, `confirm 失败: ${JSON.stringify(confirm.body)}`)
+  assert.equal(confirm.body.data.status, 'completed')
+  assert.equal(confirm.body.data.replayed, false)
+  createdDramaIds.add(confirm.body.data.drama_id)
+
+  const created = await app.fetch(new Request(`http://localhost/api/v1/dramas/${confirm.body.data.drama_id}`))
+  assert.equal(created.status, 200, '创建结果应可经 GET /dramas/:id 查询')
+})
+
+test('A2 HTTP 幂等重放：同 key 第二次 Confirm 返回同一结果，只创建一个项目', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-e2e-a2'
+  const preview = await previewPackage(userId)
+  const key = `e2e-a2-${crypto.randomUUID()}`
+  usedKeys.add(key)
+  const token = preview.body.data.preview_token
+  const first = await call('/api/v1/production-packages/import/confirm', { body: confirmPayload(preview.body.data, key, token), userId })
+  assert.equal(first.status, 200)
+  assert.equal(first.body.data.replayed, false)
+  createdDramaIds.add(first.body.data.drama_id)
+  const replay = await call('/api/v1/production-packages/import/confirm', { body: confirmPayload(preview.body.data, key, token), userId })
+  console.log('[A2]', JSON.stringify({ first: { drama: first.body.data?.drama_id, replayed: first.body.data?.replayed }, replay: { status: replay.status, drama: replay.body.data?.drama_id, replayed: replay.body.data?.replayed } }))
+  assert.equal(replay.status, 200, `重放失败: ${JSON.stringify(replay.body)}`)
+  assert.equal(replay.body.data.status, 'completed')
+  assert.equal(replay.body.data.replayed, true)
+  assert.equal(replay.body.data.drama_id, first.body.data.drama_id, '重放必须返回同一项目')
 })
 
 after(async () => {
-  if (!hasMySql || createdDramaIds.size === 0) {
-    fs.rmSync(snapshotRoot, { recursive: true, force: true })
-    fs.rmSync(reservationRoot, { recursive: true, force: true })
-    return
-  }
-  const mysql = (await import('mysql2/promise')).default
-  const options = process.env.DATABASE_URL
-    ? { uri: process.env.DATABASE_URL }
-    : { host: process.env.MYSQL_HOST, port: Number(process.env.MYSQL_PORT || 3306), user: process.env.MYSQL_USER, password: process.env.MYSQL_PASSWORD, database: process.env.MYSQL_DATABASE }
-  const pool = mysql.createPool(options)
-  try {
-    for (const dramaId of createdDramaIds) {
-      await pool.query('DELETE FROM dramas WHERE id = ?', [dramaId])
-    }
-    await pool.query('DELETE FROM preview_package_snapshots')
-  } finally {
-    await pool.end()
-    fs.rmSync(snapshotRoot, { recursive: true, force: true })
-    fs.rmSync(reservationRoot, { recursive: true, force: true })
-  }
+  fs.rmSync(snapshotRoot, { recursive: true, force: true })
+  if (isolated) await isolated.cleanup() // 隔离库直接 DROP，无需逐表清理
 })
