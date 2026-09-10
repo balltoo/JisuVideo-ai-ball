@@ -222,13 +222,13 @@
             <Sparkles :size="19" :stroke-width="1.8" />
           </div>
           <div class="dialog-head-copy">
-            <h2 class="dialog-title">{{ createStep === 'source' ? '从内容创建项目' : '选择项目方案' }}</h2>
-            <p class="dialog-desc">{{ createStep === 'source' ? '粘贴、上传文件或读取小说链接，AI 帮你提炼项目设置' : 'AI 已给出候选，你可以自由选择和修改' }}</p>
+            <h2 class="dialog-title">{{ createStep === 'source' ? '从内容创建项目' : createStep === 'package-preview' ? '预览生产包' : '选择项目方案' }}</h2>
+            <p class="dialog-desc">{{ createStep === 'source' ? '粘贴、上传文件或读取小说链接，AI 帮你提炼项目设置' : createStep === 'package-preview' ? '先核对解析结果，确认后才会创建正式项目数据' : 'AI 已给出候选，你可以自由选择和修改' }}</p>
           </div>
           <div class="step-indicator" aria-label="创建进度">
             <span :class="{ on: createStep === 'source' }">1</span>
             <i></i>
-            <span :class="{ on: createStep === 'plan' }">2</span>
+            <span :class="{ on: createStep === 'plan' || createStep === 'package-preview' }">2</span>
           </div>
         </div>
         <div v-if="createStep === 'source'" class="dialog-form">
@@ -246,12 +246,27 @@
                 :key="method.value"
                 type="button"
                 :class="['source-method', { on: sourceMode === method.value }]"
-                @click="sourceMode = method.value"
+                @click="selectSourceMode(method.value)"
               >
                 <component :is="method.icon" :size="14" :stroke-width="1.8" />
                 {{ method.label }}
               </button>
             </div>
+
+            <div v-if="sourceMode === 'production-package'" class="source-import-panel package-upload-panel" @dragover.prevent @drop.prevent="handleProductionPackageDrop">
+              <input ref="productionPackageInput" type="file" accept=".zip,application/zip" hidden @change="handleProductionPackageFile" />
+              <Archive :size="20" :stroke-width="1.6" />
+              <div>
+                <strong>{{ productionPackageFile?.name || '选择生产包 ZIP' }}</strong>
+                <span>{{ productionPackageFile ? formatPackageSize(productionPackageFile.size) : '首版仅支持 ZIP，最大 25 MiB；可将文件拖到这里' }}</span>
+              </div>
+              <button type="button" class="btn btn-sm" :disabled="productionPackageBusy" @click="productionPackageInput?.click()">
+                <span v-if="productionPackageBusy" class="spinner-sm"></span>
+                <Upload v-else :size="13" :stroke-width="1.8" />
+                {{ productionPackageBusy ? '检查中…' : '选择 ZIP' }}
+              </button>
+            </div>
+            <p v-if="productionPackageError" class="package-error" role="alert">{{ productionPackageError }}</p>
 
             <div v-if="sourceMode === 'file'" class="source-import-panel" @dragover.prevent @drop.prevent="handleFileDrop">
               <input ref="sourceFileInput" type="file" accept=".txt,.md,text/plain,text/markdown" hidden @change="handleSourceFile" />
@@ -276,32 +291,69 @@
               </Field>
             </div>
 
-            <Field class="source-field" required>
-              <template #label>
-                {{ sourceMode === 'paste' ? '小说、短文或故事内容' : '导入后的全文内容（可继续修改）' }}
-              </template>
-              <textarea
-                v-model="sourceContent"
-                class="input source-textarea"
-                placeholder="在这里粘贴小说章节、故事梗概、短文，或直接写下你的创意……"
-                maxlength="200000"
-                autofocus
-              ></textarea>
-              <span class="source-count" :class="{ ready: sourceContent.trim().length >= 20 }">
-                {{ sourceContent.trim().length.toLocaleString() }} 字<span v-if="sourceContent.trim().length < 20"> · 至少 20 字</span>
-              </span>
-            </Field>
-            <div class="analysis-note">
+            <template v-if="sourceMode !== 'production-package'">
+              <Field class="source-field" required>
+                <template #label>
+                  {{ sourceMode === 'paste' ? '小说、短文或故事内容' : '导入后的全文内容（可继续修改）' }}
+                </template>
+                <textarea
+                  v-model="sourceContent"
+                  class="input source-textarea"
+                  placeholder="在这里粘贴小说章节、故事梗概、短文，或直接写下你的创意……"
+                  maxlength="200000"
+                  autofocus
+                ></textarea>
+                <span class="source-count" :class="{ ready: sourceContent.trim().length >= 20 }">
+                  {{ sourceContent.trim().length.toLocaleString() }} 字<span v-if="sourceContent.trim().length < 20"> · 至少 20 字</span>
+                </span>
+              </Field>
+            </template>
+            <div v-if="sourceMode !== 'production-package'" class="analysis-note">
               <Sparkles :size="14" :stroke-width="1.8" />
               AI 将生成 4 个名称候选、3 个全文匹配风格，并推荐适合的画面比例。
             </div>
           </div>
           <div class="dialog-foot">
             <button type="button" class="btn" @click="closeCreateDialog">取消</button>
-            <button type="button" class="btn btn-primary" :disabled="sourceContent.trim().length < 20 || analyzing" @click="analyzeSource">
+            <button v-if="sourceMode !== 'production-package'" type="button" class="btn btn-primary" :disabled="sourceContent.trim().length < 20 || analyzing" @click="analyzeSource">
               <span v-if="analyzing" class="spinner-sm"></span>
               <Sparkles v-else :size="14" :stroke-width="1.9" />
               {{ analyzing ? '正在提炼方案…' : 'AI 提炼项目方案' }}
+            </button>
+            <button v-else type="button" class="btn btn-primary" :disabled="!productionPackagePreview || productionPackageBusy" @click="openProductionPackagePreview">
+              <RefreshCw :size="14" :stroke-width="1.9" />
+              查看预览
+            </button>
+          </div>
+        </div>
+
+        <div v-else-if="createStep === 'package-preview'" class="dialog-form">
+          <div class="dialog-body package-preview-step">
+            <div v-if="productionPackagePreview" class="package-status" :class="productionPackagePreview.status === 'blocked' ? 'is-blocked' : 'is-ready'">
+              <AlertTriangle v-if="productionPackagePreview.status === 'blocked'" :size="17" />
+              <Check v-else :size="17" />
+              <div><strong>{{ productionPackagePreview.status === 'blocked' ? '生产包存在阻断问题' : '生产包检查通过' }}</strong><span>{{ productionPackagePreview.can_confirm ? '确认后才会写入项目、剧集、人物和场景' : '请修正外部文件后重新上传' }}</span></div>
+            </div>
+            <p v-if="productionPackageError" class="package-error" role="alert">{{ productionPackageError }}</p>
+            <section v-if="productionPackagePreview?.project" class="package-section">
+              <div class="section-headline"><div><span class="section-index">01</span><strong>项目概览</strong></div><span>{{ productionPackagePreview.package?.package_version ? `v${productionPackagePreview.package.package_version}` : '' }}</span></div>
+              <div class="package-overview"><strong>{{ productionPackagePreview.project.title || '未命名项目' }}</strong><span>{{ [productionPackagePreview.project.genre, productionPackagePreview.project.style, productionPackagePreview.project.aspect_ratio].filter(Boolean).join(' · ') }}</span><p>{{ productionPackagePreview.project.bible_summary || '暂无项目简介' }}</p></div>
+            </section>
+            <section class="package-section">
+              <div class="section-headline"><div><span class="section-index">02</span><strong>剧集（{{ productionPackagePreview?.episodes?.length || 0 }}）</strong></div></div>
+              <div class="package-list"><span v-for="episode in productionPackagePreview?.episodes || []" :key="episode.episode_number">第{{ episode.episode_number }}集 · {{ episode.title || '未命名' }}</span></div>
+            </section>
+            <div class="package-columns">
+              <section class="package-section"><div class="section-headline"><div><span class="section-index">03</span><strong>人物（{{ productionPackagePreview?.characters?.length || 0 }}）</strong></div></div><div class="package-list compact"><span v-for="item in productionPackagePreview?.characters || []" :key="item.external_id">{{ item.name || item.external_id }}</span></div></section>
+              <section class="package-section"><div class="section-headline"><div><span class="section-index">04</span><strong>场景（{{ productionPackagePreview?.scenes?.length || 0 }}）</strong></div></div><div class="package-list compact"><span v-for="item in productionPackagePreview?.scenes || []" :key="item.external_id">{{ item.location || item.external_id }}<small v-if="item.time"> · {{ item.time }}</small></span></div></section>
+            </div>
+            <section v-if="packageDiagnostics.length" class="package-section diagnostics-section"><div class="section-headline"><div><span class="section-index">05</span><strong>检查提示（{{ packageDiagnostics.length }}）</strong></div></div><div class="diagnostics-list"><div v-for="item in packageDiagnostics" :key="`${item.code}-${item.path}-${item.field || ''}`" :class="['diagnostic-item', item.severity === 'error' ? 'is-error' : 'is-warning']"><strong>{{ item.severity === 'error' ? '错误' : '警告' }}</strong><span>{{ item.message }}<small v-if="item.path"> · {{ item.path }}</small></span></div></div></section>
+          </div>
+          <div class="dialog-foot">
+            <button type="button" class="btn" :disabled="productionPackageConfirming" @click="createStep = 'source'">返回重新选择</button>
+            <button type="button" class="btn btn-primary" :disabled="!productionPackagePreview?.can_confirm || productionPackageConfirming" @click="confirmProductionPackage">
+              <span v-if="productionPackageConfirming" class="spinner-sm"></span><Check v-else :size="14" :stroke-width="2.2" />
+              {{ productionPackageConfirming ? '正在创建项目…' : '确认导入并创建项目' }}
             </button>
           </div>
         </div>
@@ -450,8 +502,8 @@
 
 <script setup>
 import { toast } from 'vue-sonner'
-import { Film, Clock, Sparkles, FileText, Monitor, Smartphone, Square, Check, RefreshCw, Palette, Upload, Link, ClipboardPaste } from 'lucide-vue-next'
-import { dramaAPI, stylePresetAPI } from '~/composables/useApi'
+import { Film, Clock, Sparkles, FileText, Monitor, Smartphone, Square, Check, RefreshCw, Palette, Upload, Link, ClipboardPaste, Archive, AlertTriangle } from 'lucide-vue-next'
+import { dramaAPI, productionPackageAPI, stylePresetAPI } from '~/composables/useApi'
 import BaseSelect from '~/components/BaseSelect.vue'
 import Field from '~/components/Field.vue'
 
@@ -471,9 +523,16 @@ const sourceContent = ref('')
 const sourceMode = ref('paste')
 const sourceUrl = ref('')
 const sourceFileInput = ref(null)
+const productionPackageInput = ref(null)
 const importedSourceName = ref('')
 const importedSourceUrl = ref('')
 const importingUrl = ref(false)
+const productionPackageFile = ref(null)
+const productionPackagePreview = ref(null)
+const productionPackageBusy = ref(false)
+const productionPackageConfirming = ref(false)
+const productionPackageIdempotencyKey = ref('')
+const productionPackageError = ref('')
 const analysis = ref(null)
 const analyzing = ref(false)
 const analyzingStyles = ref(false)
@@ -488,7 +547,16 @@ const sourceMethods = [
   { label: '粘贴内容', value: 'paste', icon: ClipboardPaste },
   { label: '上传 TXT / MD', value: 'file', icon: Upload },
   { label: '小说链接', value: 'url', icon: Link },
+  { label: '导入生产包', value: 'production-package', icon: Archive },
 ]
+const packageDiagnostics = computed(() => {
+  const diagnostics = productionPackagePreview.value?.diagnostics || {}
+  return [
+    ...(Array.isArray(diagnostics.missing) ? diagnostics.missing : []),
+    ...(Array.isArray(diagnostics.conflicts) ? diagnostics.conflicts : []),
+    ...(Array.isArray(diagnostics.warnings) ? diagnostics.warnings : []),
+  ]
+})
 const styleSelectOptions = computed(() => stylePresets.value.map(p => ({ label: p.name, value: p.value })))
 const selectedStyleCandidate = computed(() => {
   if (customStyleActive.value) {
@@ -651,6 +719,11 @@ function openCreateDialog() {
   sourceUrl.value = ''
   importedSourceName.value = ''
   importedSourceUrl.value = ''
+  productionPackageFile.value = null
+  productionPackagePreview.value = null
+  productionPackageBusy.value = false
+  productionPackageConfirming.value = false
+  productionPackageIdempotencyKey.value = ''
   analysis.value = null
   inspirationStyle.value = null
   confirmNewStyle.value = false
@@ -669,8 +742,107 @@ function openCreateWithStyle(preset) {
 }
 
 function closeCreateDialog() {
-  if (analyzing.value || analyzingStyles.value || importingUrl.value || creatingProject.value) return
+  if (analyzing.value || analyzingStyles.value || importingUrl.value || creatingProject.value || productionPackageBusy.value || productionPackageConfirming.value) return
   showCreate.value = false
+}
+
+function selectSourceMode(mode) {
+  sourceMode.value = mode
+  productionPackageError.value = ''
+  if (mode !== 'production-package') {
+    productionPackageFile.value = null
+    productionPackagePreview.value = null
+    if (createStep.value === 'package-preview') createStep.value = 'source'
+  }
+}
+
+function formatPackageSize(bytes) {
+  const size = Number(bytes) || 0
+  return size >= 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MiB` : `${Math.max(1, Math.round(size / 1024))} KiB`
+}
+
+async function previewProductionPackage(file) {
+  if (!file || productionPackageBusy.value) return
+  if (!String(file.name || '').toLowerCase().endsWith('.zip')) {
+    toast.error('仅支持 ZIP 生产包')
+    return
+  }
+  if (file.size > 25 * 1024 * 1024) {
+    toast.error('ZIP 大小不能超过 25 MiB')
+    return
+  }
+  try {
+    productionPackageBusy.value = true
+    productionPackageError.value = ''
+    productionPackageFile.value = file
+    productionPackageIdempotencyKey.value = idempotencyKey()
+    productionPackagePreview.value = await productionPackageAPI.preview(file)
+    createStep.value = 'package-preview'
+  } catch (e) {
+    productionPackagePreview.value = null
+    productionPackageError.value = formatProductionPackageError(e, '生产包解析失败，请检查 ZIP 内容')
+    toast.error(productionPackageError.value)
+  } finally {
+    productionPackageBusy.value = false
+  }
+}
+
+function handleProductionPackageFile(event) {
+  const file = event.target?.files?.[0]
+  if (file) previewProductionPackage(file)
+  if (event.target) event.target.value = ''
+}
+
+function handleProductionPackageDrop(event) {
+  const file = event.dataTransfer?.files?.[0]
+  if (file) previewProductionPackage(file)
+}
+
+function openProductionPackagePreview() {
+  if (productionPackagePreview.value) createStep.value = 'package-preview'
+}
+
+function idempotencyKey() {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  return `ui-${uuid || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`
+}
+
+function formatProductionPackageError(error, fallback) {
+  const messages = {
+    PACKAGE_PREVIEW_UNAUTHORIZED: '登录会话已失效或跨域配置异常，请刷新页面重新登录。',
+    PACKAGE_PREVIEW_AUTH_UNAVAILABLE: '预览会话服务暂不可用，请稍后重试。',
+    PACKAGE_PREVIEW_EXPIRED: '预览已过期，请重新上传 ZIP 后再确认。',
+    PACKAGE_SNAPSHOT_MISMATCH: '预览内容已变化，请重新上传 ZIP，避免导入错误版本。',
+    PACKAGE_IMPORT_IN_PROGRESS: '导入正在处理中，请稍候；不要生成新的幂等键重复提交。',
+    PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT: '本次幂等键已用于其他生产包，请重新上传并重新发起导入。',
+    PACKAGE_IMPORT_FAILED: '导入失败且未创建完整项目；请点“返回重新选择”重新上传，以使用新的幂等键。',
+  }
+  return messages[error?.code] || error?.message || fallback
+}
+
+async function confirmProductionPackage() {
+  const preview = productionPackagePreview.value
+  if (!preview?.can_confirm || productionPackageConfirming.value) return
+  try {
+    productionPackageConfirming.value = true
+    productionPackageError.value = ''
+    const result = await productionPackageAPI.confirm({
+      preview_token: preview.preview_token,
+      package_fingerprint: preview.package.package_fingerprint,
+      validation_fingerprint: preview.package.validation_fingerprint,
+      idempotency_key: productionPackageIdempotencyKey.value || idempotencyKey(),
+    })
+    if (!result?.drama_id) throw new Error('导入已返回，但没有找到新项目编号')
+    showCreate.value = false
+    toast.success('生产包已导入，项目创建完成')
+    await load()
+    navigateTo(`/drama/${result.drama_id}`)
+  } catch (e) {
+    productionPackageError.value = formatProductionPackageError(e, '确认导入失败，请检查提示后重试')
+    toast.error(productionPackageError.value)
+  } finally {
+    productionPackageConfirming.value = false
+  }
 }
 
 async function importLocalSourceFile(file) {
@@ -1446,7 +1618,7 @@ onMounted(load)
 .source-intro p { margin: 3px 0 0; color: var(--text-2); font-size: 12px; line-height: 1.55; }
 .source-methods {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   padding: 4px;
   border-radius: var(--radius);
@@ -1482,6 +1654,31 @@ onMounted(load)
 .source-import-panel > div { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
 .source-import-panel strong { color: var(--text-0); font-size: 12px; }
 .source-import-panel span { color: var(--text-3); font-size: 10.5px; }
+.package-upload-panel { min-height: 82px; }
+.package-preview-step { min-height: 430px; max-height: min(62vh, 620px); overflow-y: auto; padding-right: 4px; }
+.package-status { display: flex; align-items: flex-start; gap: 9px; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--success); background: var(--success-bg); color: var(--success-strong); }
+.package-status.is-blocked { border-color: var(--danger); background: var(--danger-bg); color: var(--danger-strong); }
+.package-status > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.package-status strong { color: var(--text-0); font-size: 12px; }
+.package-status span { color: var(--text-2); font-size: 10.5px; }
+.package-section { display: flex; flex-direction: column; gap: 10px; }
+.package-overview { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); }
+.package-overview strong { color: var(--text-0); font-size: 14px; }
+.package-overview span { color: var(--accent); font-size: 11px; }
+.package-overview p { margin: 2px 0 0; color: var(--text-2); font-size: 11px; line-height: 1.55; }
+.package-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.package-list span { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-1); color: var(--text-1); font-size: 10.5px; }
+.package-list.compact { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.package-list.compact span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.package-list small { color: var(--text-3); }
+.package-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.diagnostics-list { display: flex; flex-direction: column; gap: 6px; }
+.diagnostic-item { display: flex; align-items: flex-start; gap: 7px; padding: 8px 10px; border-radius: 6px; background: var(--warning-bg); color: var(--text-1); font-size: 10.5px; line-height: 1.45; }
+.diagnostic-item.is-error { background: var(--danger-bg); }
+.diagnostic-item strong { flex: 0 0 auto; color: var(--warning-strong); font-size: 10px; }
+.diagnostic-item.is-error strong { color: var(--danger-strong); }
+.diagnostic-item span { min-width: 0; }
+.diagnostic-item small { color: var(--text-3); }
 .source-url-panel { padding: 12px 13px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1); }
 .source-url-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .source-field { position: relative; flex: 1; }
@@ -1632,6 +1829,7 @@ onMounted(load)
   .existing-style-controls, .custom-style-grid, .source-url-row { grid-template-columns: 1fr; }
   .source-methods { grid-template-columns: 1fr; }
   .source-import-panel { align-items: flex-start; flex-wrap: wrap; }
+  .package-columns, .package-list.compact { grid-template-columns: 1fr; }
   .dialog-foot { flex-direction: column-reverse; }
   .dialog-foot .btn { width: 100%; }
   .plan-foot .btn:first-child { margin-right: 0; }

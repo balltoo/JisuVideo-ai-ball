@@ -9,7 +9,9 @@ function summarizeForLog(value: any, depth = 0): any {
 }
 
 async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
-  const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } }
+  // Keep browser calls same-origin so the server-issued HttpOnly preview
+  // session cookie is sent for both Preview and Confirm.
+  const opts: RequestInit = { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } }
   if (body) opts.body = JSON.stringify(body)
 
   const start = performance.now()
@@ -155,13 +157,36 @@ async function uploadReq<T = any>(path: string, file: File, meta: Record<string,
     if (value !== undefined && value !== null) fd.append(key, String(value))
   }
   console.log(`%c[API] %cPOST %c${path} %c${file.name}`, 'color:#888', 'color:#4fc3f7;font-weight:bold', 'color:#ccc', 'color:#888')
-  const resp = await fetch(`${BASE}${path}`, { method: 'POST', body: fd })
+  const resp = await fetch(`${BASE}${path}`, { method: 'POST', credentials: 'same-origin', body: fd })
   const json = await resp.json()
   if (!resp.ok || (json.code && json.code >= 400)) {
     console.log(`%c[API] %cPOST ${path} %c${resp.status}`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold')
     throw new Error(json.message || `${resp.status}`)
   }
   return json.data ?? json
+}
+
+async function productionPackagePreviewReq<T = any>(file: File): Promise<T> {
+  const fd = new FormData()
+  fd.append('file', file)
+  // Do not use req(): the ZIP must remain multipart and must never be serialized
+  // or included in the normal JSON request summary.
+  const resp = await fetch(`${BASE}/production-packages/preview`, { method: 'POST', credentials: 'same-origin', body: fd })
+  const json = await resp.json().catch(() => ({}))
+  if (!resp.ok || (json.code && json.code >= 400)) {
+    const error: any = new Error(json.message || `${resp.status}`)
+    error.status = resp.status
+    error.code = json.code
+    error.details = json.details
+    throw error
+  }
+  return json.data ?? json
+}
+
+export const productionPackageAPI = {
+  preview: (file: File) => productionPackagePreviewReq(file),
+  getPreview: (token: string) => api.get(`/production-packages/preview/${encodeURIComponent(token)}`),
+  confirm: (data: { preview_token: string; package_fingerprint: string; validation_fingerprint: string; idempotency_key: string }) => api.post('/production-packages/import/confirm', data),
 }
 
 export const uploadAPI = {
