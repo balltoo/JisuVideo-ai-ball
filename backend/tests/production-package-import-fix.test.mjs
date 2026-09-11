@@ -20,6 +20,7 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import yazl from 'yazl'
 import * as helpers from './fixtures/production-package/helpers.mjs'
+import { prepareIsolatedMySql } from './fixtures/production-package/mysql-isolate.mjs'
 
 process.env.NODE_ENV = 'test'
 process.env.MYSQL_NO_INIT = '1'
@@ -31,11 +32,13 @@ process.env.PREVIEW_PACKAGE_SNAPSHOT_STORE = 'mysql'
 process.env.PREVIEW_AUTH_NONCE_STORE = 'mysql'
 process.env.PREVIEW_REQUEST_RESOURCE_STORE = 'mysql'
 
+// 与 e2e/reliability 相同：唯一隔离库，避免 npm test 多文件并发互踩。
+const hasMySql = Boolean(process.env.MYSQL_HOST || process.env.DATABASE_URL)
+const isolated = hasMySql ? await prepareIsolatedMySql('jisu_pp_fix') : null
 const { app, createApi } = await import('../src/index.ts')
 const { signPreviewIdentity, PREVIEW_AUTH_AUDIENCE } = await import('../src/middleware/preview-auth.ts')
 
 const FIXTURE_PACKAGE = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
-const hasMySql = Boolean(process.env.MYSQL_HOST || process.env.DATABASE_URL)
 const poolOptions = process.env.DATABASE_URL
   ? { uri: process.env.DATABASE_URL }
   : { host: process.env.MYSQL_HOST, port: Number(process.env.MYSQL_PORT || 3306), user: process.env.MYSQL_USER, password: process.env.MYSQL_PASSWORD, database: process.env.MYSQL_DATABASE }
@@ -213,7 +216,6 @@ test('修复 2：并发相同幂等键只创建一个项目，其余重放或 40
     : { host: process.env.MYSQL_HOST, port: Number(process.env.MYSQL_PORT || 3306), user: process.env.MYSQL_USER, password: process.env.MYSQL_PASSWORD, database: process.env.MYSQL_DATABASE }
   const pool = mysql.createPool(poolOptions)
   try {
-    const before = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
     const results = await Promise.all(Array.from({ length: 5 }, () => confirmProductionPackageImport({
       token: preview.preview_token,
       owner: ownerKey,
@@ -221,22 +223,40 @@ test('修复 2：并发相同幂等键只创建一个项目，其余重放或 40
       validationFingerprint: preview.package.validation_fingerprint,
       idempotencyKey: key,
     }).then((value) => ({ ok: value }), (error) => ({ error }))))
-    const after = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
     const created = results.filter(r => r.ok && r.ok.replayed === false)
     const replayed = results.filter(r => r.ok && r.ok.replayed === true && r.ok.status === 'completed')
     const rejected = results.filter(r => r.error)
-    const [linked] = await pool.query('SELECT drama_id FROM production_package_imports WHERE idempotency_key = ?', [key])
-    const orphanDramas = created.map(r => r.ok.drama_id).filter(id => !linked.some(l => Number(l.drama_id) === id))
+    // 孤儿判定以数据库事实为准，不从返回值推导（与 reliability R3 同步）：
+    // 原实现只覆盖"返回了 ok 且 replayed===false"的请求，写入 drama 后在响应/收口
+    // 阶段失败的请求不在 created 里，孤儿会留在库里而断言看不到。
+    const [importRows] = await pool.query('SELECT id, drama_id FROM production_package_imports WHERE idempotency_owner = ? AND idempotency_key = ?', [ownerKey, key])
+    const importIds = new Set(importRows.map(r => Number(r.id)))
+    const linkedDramaIds = new Set(importRows.filter(r => r.drama_id != null).map(r => Number(r.drama_id)))
+    const [allDramas] = await pool.query('SELECT id, metadata FROM dramas')
+    const dramasForThisImport = allDramas.filter((d) => {
+      let meta = null
+      try { meta = d.metadata ? JSON.parse(d.metadata) : null } catch { return false }
+      return meta?.production_package?.import_id != null && importIds.has(Number(meta.production_package.import_id))
+    })
+    const orphanDramas = dramasForThisImport.filter(d => !linkedDramaIds.has(Number(d.id)))
     console.log('[fix-2]', JSON.stringify({
       created: created.length,
       replayed: replayed.length,
-      rejected: rejected.map(r => `${r.error.code}:${r.error.status}:${String(r.error.message).slice(0, 60)}`),
-      dramaDelta: after - before,
+      rejected: rejected.map(r => `${r.error.code}:${r.error.status}`),
+      uniqueCreatedDramaIds: [...new Set(created.map(r => r.ok.drama_id))].length,
+      importRows: importRows.length,
+      dramasForThisImport: dramasForThisImport.length,
+      totalDramas: allDramas.length,
       orphanDramas: orphanDramas.length,
     }))
     assert.equal(created.length, 1, '并发下只能有一个请求真正写入')
-    assert.equal(after - before, 1)
-    assert.equal(orphanDramas.length, 0, '不得产生孤儿项目')
+    assert.equal(new Set(created.map(r => r.ok.drama_id)).size, 1, '并发下只能产生一个唯一项目')
+    assert.equal(importRows.length, 1, '本次幂等键只能有一行导入记录')
+    assert.equal(dramasForThisImport.length, 1, '本次 import 在 dramas 表实际写入行数必须严格为 1（DB 事实，非返回值推导）')
+    for (const row of importRows) {
+      assert.ok(row.drama_id != null && dramasForThisImport.some(d => Number(d.id) === Number(row.drama_id)), '导入记录必须唯一指向本次创建的 drama')
+    }
+    assert.equal(orphanDramas.length, 0, 'dramas 中不得存在无幂等记录指向的孤儿行')
     for (const r of rejected) assert.equal(r.error.status, 409)
     for (const r of replayed) assert.equal(r.ok.drama_id, created[0].ok.drama_id)
     createdDramaIds.add(created[0].ok.drama_id)
@@ -246,18 +266,6 @@ test('修复 2：并发相同幂等键只创建一个项目，其余重放或 40
 })
 
 after(async () => {
-  if (!hasMySql) { fs.rmSync(snapshotRoot, { recursive: true, force: true }); return }
-  const mysql = (await import('mysql2/promise')).default
-  const poolOptions = process.env.DATABASE_URL
-    ? { uri: process.env.DATABASE_URL }
-    : { host: process.env.MYSQL_HOST, port: Number(process.env.MYSQL_PORT || 3306), user: process.env.MYSQL_USER, password: process.env.MYSQL_PASSWORD, database: process.env.MYSQL_DATABASE }
-  const pool = mysql.createPool(poolOptions)
-  try {
-    for (const dramaId of createdDramaIds) await pool.query('DELETE FROM dramas WHERE id = ?', [dramaId])
-    for (const key of usedKeys) await pool.query('DELETE FROM production_package_imports WHERE idempotency_key = ?', [key])
-    await pool.query('DELETE FROM preview_package_snapshots')
-  } finally {
-    await pool.end()
-    fs.rmSync(snapshotRoot, { recursive: true, force: true })
-  }
+  fs.rmSync(snapshotRoot, { recursive: true, force: true })
+  if (isolated) await isolated.cleanup() // 隔离库直接 DROP
 })
