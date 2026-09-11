@@ -48,9 +48,9 @@ node --import tsx/esm --test --test-force-exit tests/production-package-import-f
 | R6 | Confirm 写入阶段失败 | 服务层 | `500 PACKAGE_IMPORT_FAILED`；幂等行收口 `failed` 且 `error_json` 可诊断；`dramas +0`；同 key 重放恒 `failed`；换 key 重试 `completed` | 通过（含 1 项语义待确认，见 §3） |
 | R7 | 数据清洁（成功路径） | 服务层 | `episodes/characters/scenes = 2/2/2`（与包一致）；`source_versions = 1`；孤儿 `episode_characters`、`episode_scenes` 均为 0 | 通过 |
 | R8 | Preview 租约与清理边界 | 服务层 | 过期快照回收 8 行、残留 0；孤儿目录回收 1 个 | 通过 |
-| M1 | `target_mode` 四项逻辑身份（契约 §5.2/§5.3） | — | **未覆盖**：Confirm 链路无 `target_mode` 输入，`production_package_imports` 无该列 | **未覆盖（阻塞）** |
+| M1 | `target_mode` 四项逻辑身份（契约 §5.2/§5.3） | — | **未覆盖**：Confirm 链路无 `target_mode` 输入，`production_package_imports` 无该列；已挂账 Issue #117 | **未覆盖（阻塞）** |
 | T1 | `npm run typecheck` | — | 通过 | — |
-| T2 | `npm test`（全量，真实 MySQL） | — | **280 / 280 通过，0 fail，0 skipped** | — |
+| T2 | `npm test`（全量，真实 MySQL，基线 `6384cec`） | — | **0 fail，0 skipped**（该基线当时总数 280） | — |
 
 > 上表为缺陷发现时的实测（基线 `6384cec`）；A3/R3 对应两个缺陷。修复后健康目标复验见 §6。
 >
@@ -112,7 +112,7 @@ node --import tsx/esm --test --test-force-exit tests/production-package-import-f
 | 白名单收敛 | 同 owner `GET /preview/:token`=200；`POST /preview/:token`、`GET /preview`、`PUT /import/confirm` 均 401 |
 | R3 并发 5× 同 key | `created=1`、唯一 drama、孤儿 0；其余 4 个全部 `409 PACKAGE_IMPORT_IN_PROGRESS` |
 | R1/R2/R4–R8 | 均通过（同 key 幂等 1 行、换包 409、过期 410 + 清理、篡改 409、失败 `failed` 收口且无半成品、数据清洁无孤儿、租约/孤儿目录回收） |
-| typecheck / npm test | 通过；**283 / 283 ×2 次复跑，0 fail，0 skipped**（含 e2e A1/A2、reliability R1–R8、fix 回归 3 用例） |
+| typecheck / npm test | 通过；**0 fail，0 skipped**（含 e2e A1/A2、reliability R1–R8、fix 回归 4 用例） |
 
 ### 隔离说明
 
@@ -120,6 +120,27 @@ node --import tsx/esm --test --test-force-exit tests/production-package-import-f
 `backend/tests/fixtures/production-package/mysql-isolate.mjs` 各自使用唯一隔离库
 （CREATE → 设置 `MYSQL_DATABASE` → `initMySqlSchema` → 结束 DROP），避免 npm test
 多文件并发与既有真实 MySQL 测试共用开发/CI 库时互相污染（如 preview 的 nonce 配额用例）。
+
+### 测试总数口径（避免与 CI 数字对不上）
+
+上表按 owner 门禁要求**只报 fail/skip，不报总数**——测试总数会随仓库演进变化，
+写死在验收文档里迟早失准。当前实测（head `584d128`）：
+
+| 环境 | 命令 | 结果 |
+| --- | --- | --- |
+| CI（权威） | `backend (typecheck + npm test with MySQL)`，node 22.23.2 + MySQL 8.0，run `34544635684` | 279 pass / 0 fail / 0 skipped |
+| 本机 | `npx -y node@22 --import tsx/esm --test --test-force-exit`，node 22.23.2 + MySQL 8.4（Docker） | 289 pass / 0 fail / 0 skipped |
+
+**279 与 289 的差异（10 个）已定位，与本报告无关**：缺的 10 个全部在既有文件
+`backend/tests/fixtures/production-package/production-package.test.mjs` 的 856–1062 行
+（契约语义期望登记守卫、T10/T12 只读与无副作用守卫、T99 fixture 自校验、样本版权扫描等）。
+该文件在 HEAD、master、PR merge ref 三处**完全一致**（均 1071 行、均含这 10 个测试），
+且 CI 该文件的测试严格按源文件行号 44 → 846 递增执行、**846 行之后 CI 未再执行任何测试**
+（CI 最后一个来自该文件的用例是 846 行的「B5 BOM 阻断」，紧随其后的 856 行用例未出现在
+CI 日志中）。本机用与 CI 完全相同的 node 22.23.2 复跑全量得到 289，说明差异来自 CI
+（node 22.23.2 + MySQL 8.0）运行该既有 fixture 文件时的环境行为，不是本 PR 引入的测试，
+也不影响本报告的三项验收（e2e A1/A2、reliability R1–R8、fix 回归 4 用例）——它们
+在 CI 与本机两侧均实际执行并通过。
 
 ### 遗留待办
 
@@ -130,5 +151,6 @@ node --import tsx/esm --test --test-force-exit tests/production-package-import-f
   目前只实现了前两项比对；`target_mode` 未进入 `ConfirmImportInput`、
   `production_package_imports` schema 与身份比对，"不支持的 target mode 阻断"也不存在。
   该任务需要改 `backend/src/**`（类型、服务实现、`mysql-schema.ts` 迁移与存量回填），
-  超出本 PR 声明的修改范围，已拆出为独立阻塞任务单独推进；在其落地前，
-  本报告的验收范围**不含**含 `target_mode` 的契约语义。
+  超出本 PR 声明的修改范围，已拆出为独立阻塞任务 **Issue #117**
+  （`[BLOCKER] Confirm 链路缺失 target_mode`，labels `status:blocked` / `type:task`）单独推进；
+  在其落地前，本报告的验收范围**不含**含 `target_mode` 的契约语义。
