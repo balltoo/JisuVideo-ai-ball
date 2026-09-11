@@ -174,7 +174,11 @@ test('R3 并发确认：只有一个请求真正创建项目，其余为 409 或
   //   1. 按本次 import_id 集合（dramas.metadata.production_package.import_id，
   //      writeImport 写入）统计实际 dramas 行，必须严格为 1；
   //   2. 幂等记录唯一，且唯一指向本次创建的 drama；
-  //   3. 全库兜底：dramas 中无幂等记录指向的行必须为 0（覆盖响应/收口阶段失败）。
+  //   3. 本次范围内的孤儿兜底：metadata 指向本次 import_id、但未被幂等记录
+  //      drama_id 覆盖的 dramas 必须为 0（覆盖响应/收口阶段失败）。
+  //      注意孤儿判定必须限定在本次 import 范围（按 import_id 过滤），不能做
+  //      全库兜底——隔离库由同一文件内 R1/R2 等用例共享，它们创建的 drama
+  //      有自己的幂等记录，全库查询会把它们误判为孤儿。
   const ownerKey = owner(userId)
   const [importRows] = await pool.query('SELECT id, drama_id FROM production_package_imports WHERE idempotency_owner = ? AND idempotency_key = ?', [ownerKey, key])
   const importIds = new Set(importRows.map(r => Number(r.id)))
@@ -185,8 +189,7 @@ test('R3 并发确认：只有一个请求真正创建项目，其余为 409 或
     try { meta = d.metadata ? JSON.parse(d.metadata) : null } catch { return false }
     return meta?.production_package?.import_id != null && importIds.has(Number(meta.production_package.import_id))
   })
-  const allDramaIds = new Set(allDramas.map(d => Number(d.id)))
-  const orphanDramas = [...allDramaIds].filter(id => !linkedDramaIds.has(id))
+  const orphanDramas = dramasForThisImport.filter(d => !linkedDramaIds.has(Number(d.id)))
   console.log('[R3]', JSON.stringify({
     created: created.length,
     replayed: replayed.length,

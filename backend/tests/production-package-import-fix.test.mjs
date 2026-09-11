@@ -238,7 +238,7 @@ test('修复 2：并发相同幂等键只创建一个项目，其余重放或 40
       try { meta = d.metadata ? JSON.parse(d.metadata) : null } catch { return false }
       return meta?.production_package?.import_id != null && importIds.has(Number(meta.production_package.import_id))
     })
-    const orphanDramas = allDramas.map(d => Number(d.id)).filter(id => !linkedDramaIds.has(id))
+    const orphanDramas = dramasForThisImport.filter(d => !linkedDramaIds.has(Number(d.id)))
     console.log('[fix-2]', JSON.stringify({
       created: created.length,
       replayed: replayed.length,
