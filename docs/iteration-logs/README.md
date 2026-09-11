@@ -83,6 +83,13 @@
 | HB-20260907-06 | Issue #95 PR #97 第二轮评审反馈收口 | 已将幂等记录、业务数据和 succeeded 结果冻结为同一事务；补充 source canonical 拼接精确规则、可复算 hash 向量及旧 trim helper 兼容边界；待 PR #97 再次复审 | [查看导入契约](../production-package-import-v0.1.md) |
 | HB-20260907-07 | Issue #95 PR #97 第三轮评审反馈收口 | 已固定 validation fingerprint 参与确认身份及校验顺序；补充 T08b/T08c；明确 `sha256:` 展示值与数据库 64 位 hex 存储值的转换，并让金样例脚本校验三组摘要；待 PR #97 最后一轮复审 | [查看导入契约](../production-package-import-v0.1.md) |
 
+## 2026-09-10
+
+| 编号 | 迭代 | 状态 | 详细日志 |
+|---|---|---|---|
+| HB-20260910-01 | PR #109 二轮复核：生产包导入 UI 与错误映射收口 | 复核已通过（Aibrother258 APPROVED，mergeStateStatus=CLEAN，待 owner 拍板合并）；`formatProductionPackageError()` 补齐 `PACKAGE_PREVIEW_UNAUTHORIZED` / `PACKAGE_PREVIEW_AUTH_UNAVAILABLE` 两个 401/503 错误码映射，`PACKAGE_IMPORT_FAILED` 文案改为引导点"返回重新选择"生成新幂等键；结构测试 3→4（新增 auth error recovery 断言）；Issue #107 验收标准 6（真实浏览器 smoke）降级为合入后验收项，由有 docker-compose 会话的环境补做 | [查看复核日志](./2026-09-10-pr109-ui-review-round2.md) |
+| HB-20260910-02 | PR #109 squash 合入 master | 已合入（merge commit `d391ddf`，2026-09-10T14:44:26+08:00）；#107 UI 范围已交付，验收标准 6（浏览器 smoke）降级为合入后验收项；#115 由 Fork B 承接后端可靠性验证 | [查看复核日志](./2026-09-10-pr109-ui-review-round2.md) |
+
 ## 记录规范
 
 每篇日志至少包含：
