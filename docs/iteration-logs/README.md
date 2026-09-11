@@ -100,6 +100,8 @@
 
 | HB-20260912-03 | Issue #120：接受 Windows 自带压缩 ZIP 的反斜杠条目名（不放宽路径安全） | 已合入（PR #124，merge `2a096c5`，2026-09-11T19:10:28Z；csx12588 APPROVED 后 admin squash）。`openZip()` 的 yauzl 选项 `strictFileNames: true → false`：非严格模式下 yauzl 会先把反斜杠规范化为 `/` 并继续拒绝绝对路径与 `..` 穿越，`normalizeEntryName()` / `extractZip()` 的 NUL、绝对路径、`..`、深度、重复/大小写冲突、链接/特殊文件、`path.resolve` 越界校验全部保留为第二道防线；契约 `docs/production-package-zip-transport-v0.1.md` §3/§7.2 明确条目名分隔符口径（允许反斜杠作为相对路径分隔符并规范化，但不得放宽任何拒绝条件）。验证：typecheck 通过、定向 26 pass、全量 `npm test` **294 pass / 0 fail / 0 skipped**、dev 栈真实链路用 `Compress-Archive` 包 Preview **200** → Confirm **200 completed**（`drama_id=15`；修复前同一包为 `400`） | [查看 PR #124](https://github.com/Aibrother258/JisuVideo-ai/pull/124) |
 
+| HB-20260912-04 | 「普通上班族如何学 AI」文本链路最小闭环试跑（探针式，无生产代码改动）——走通 ① 导入原文 → ⑧ 视频提示词 全链路，并对每个环节做数据库级验收；产出 20 项问题清单（P0 × 1 / P1 × 3 / P2 × 12 / P3 × 4），含 `GET /ai-configs` 明文返回 API Key、`script_rewriter` 改写相对时间并丢失事实、Step1 剧本面板无保存按钮、`@` 引用在资产图缺失时静默跳过、`naturalBoundaries` 不识别章节标题等 | 试跑完成（`dramas.id=86`）：拆集零改写（三集拼接去空白与快照严格相等 2454 == 2454）、`source_versions` 懒生成、草稿乐观锁、5 个 Agent 自治写入、台词时长硬规则、ID 白名单约束、道具三问过滤均经实测确认有效；20 项问题**全部登记未修**（试跑中仅就地人工处理 3 处：剧本 2 处事实错误、场景 1 处时变元素）；未进入付费环节（生图 / 生视频 / 拼接），EP02 / EP03 未验证，跨集一致性无证据 | [查看日志](./2026-09-12-office-ai-learning-trial-findings.md) |
+
 ## 记录规范
 
 每篇日志至少包含：
