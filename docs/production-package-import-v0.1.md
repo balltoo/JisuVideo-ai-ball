@@ -207,6 +207,21 @@ Confirm 固定按以下顺序处理：
 
 manifest 也在全部文件比对范围内，因此预览后任一文件（包括 `source-manifest.md`）变化都必须先返回 `PACKAGE_SNAPSHOT_MISMATCH`。`PACKAGE_HASH_MISMATCH` 仅用于 Parse 阶段发现 `source-manifest.md` 声明的 `package_fingerprint` 与当前包计算值不一致。
 
+> **实现注记：v0.1 的实际处理顺序与目标顺序的差异（2026-09-12 登记）**
+>
+> 上面 1 → 2 → 3 是本契约要求的**目标顺序**。v0.1 当前实现
+> （`backend/src/services/production-package-import.ts`）的实际顺序是：
+> 先按 §5.2 查既有幂等记录并比对四项身份（即上面的第 2 步），然后再加载预览快照、
+> 校验指纹与上传字节（第 1 步），最后进入业务事务（第 3 步）。
+>
+> 两者只在**同时发生"身份冲突"与"快照变化"**的夹缝场景下产生可观察差异：此时当前实现返回
+> `IDEMPOTENCY_KEY_REUSED`，而按目标顺序会先返回 `PACKAGE_SNAPSHOT_MISMATCH`。
+> v0.1 的正常路径（首次确认、同 key 幂等重放、换包换 key）两种顺序结果一致。
+>
+> 该差异**不影响 v0.1 的功能正确性与数据安全**（首次写入仍在事务内、身份四项比对与快照校验都不缺），
+> 已在 PR #118（Issue #117）的复核结论中登记为独立后续评估项。后续调整 Confirm 链路时按目标顺序收敛，
+> 并补充"同 key + 预览后包被修改"的组合用例。
+
 ### 5.2 幂等键
 
 - `confirm_idempotency_key` 是调用方生成的稳定不透明字符串，长度 16–128 个 ASCII 字符。
