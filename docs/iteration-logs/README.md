@@ -90,6 +90,12 @@
 | HB-20260910-01 | PR #109 二轮复核：生产包导入 UI 与错误映射收口 | 复核已通过（Aibrother258 APPROVED，mergeStateStatus=CLEAN，待 owner 拍板合并）；`formatProductionPackageError()` 补齐 `PACKAGE_PREVIEW_UNAUTHORIZED` / `PACKAGE_PREVIEW_AUTH_UNAVAILABLE` 两个 401/503 错误码映射，`PACKAGE_IMPORT_FAILED` 文案改为引导点"返回重新选择"生成新幂等键；结构测试 3→4（新增 auth error recovery 断言）；Issue #107 验收标准 6（真实浏览器 smoke）降级为合入后验收项，由有 docker-compose 会话的环境补做 | [查看复核日志](./2026-09-10-pr109-ui-review-round2.md) |
 | HB-20260910-02 | PR #109 squash 合入 master | 已合入（merge commit `d391ddf`，2026-09-10T14:44:26+08:00）；#107 UI 范围已交付，验收标准 6（浏览器 smoke）降级为合入后验收项；#115 由 Fork B 承接后端可靠性验证 | [查看复核日志](./2026-09-10-pr109-ui-review-round2.md) |
 
+## 2026-09-12
+
+| 编号 | 迭代 | 状态 | 详细日志 |
+|---|---|---|---|
+| HB-20260912-01 | Issue #117：Confirm 链路补齐 `target_mode` 四项逻辑身份与契约错误码 | 已合入（PR #118，merge `b0cf0c4`，2026-09-11T17:46:10Z；csx12588 APPROVED 后 admin squash）。`ConfirmImportInput` 增加 `targetMode`；幂等身份四项化（`package_fingerprint` + `validation_fingerprint` + `target_mode`），同 key 换任一身份 → `409 IDEMPOTENCY_KEY_REUSED`；支持性校验置于原子 claim 之后、`COMMIT` 之前，非 `new_project` → `400 PACKAGE_TARGET_UNSUPPORTED` 且回滚 claim（同时满足契约 §5.3 T09 与 C3）；`production_package_imports` 增加 `target_mode VARCHAR(32) NOT NULL DEFAULT 'new_project'` 并启动幂等补列回填；前端提交 `target_mode` 并补错误码文案。本地 `npm test` 293 pass / 0 fail / 0 skipped、前端 161 pass 与 build 通过，CI 两轮 backend + frontend 全 pass；#117、#108 已关闭 | [查看 PR #118](https://github.com/Aibrother258/JisuVideo-ai/pull/118) |
+
 ## 记录规范
 
 每篇日志至少包含：
