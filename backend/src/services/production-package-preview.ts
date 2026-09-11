@@ -120,7 +120,17 @@ function readEntry(zip: ZipFile, entry: Entry): Promise<Buffer> {
 }
 
 function openZip(buffer: Buffer): Promise<ZipFile> {
-  return new Promise((resolve, reject) => yauzl.fromBuffer(buffer, { lazyEntries: true, validateEntrySizes: true, strictFileNames: true }, (error, zip) => error || !zip ? reject(error || archiveError('ZIP 无法读取')) : resolve(zip)))
+  // `strictFileNames` is deliberately disabled (Issue #120): Windows' built-in
+  // "Send to > Compressed folder" and `Compress-Archive` write backslash
+  // separators (`episodes\001.md`), which strict mode rejects outright *before*
+  // `normalizeEntryName()` can canonicalize them, so a valid package failed
+  // with an unactionable "ZIP 解压失败".
+  // With the option off yauzl canonicalizes `\` to `/` and still rejects
+  // absolute paths and `..` traversal; `normalizeEntryName` / `extractZip`
+  // then repeat the NUL byte, absolute path, `..`, depth, duplicate,
+  // link/special-file and resolved-path-escape checks as a second line of
+  // defence, so path safety never depended on this option.
+  return new Promise((resolve, reject) => yauzl.fromBuffer(buffer, { lazyEntries: true, validateEntrySizes: true, strictFileNames: false }, (error, zip) => error || !zip ? reject(error || archiveError('ZIP 无法读取')) : resolve(zip)))
 }
 
 async function extractZip(buffer: Buffer): Promise<{ packageRoot: string; snapshotDirectory: string }> {

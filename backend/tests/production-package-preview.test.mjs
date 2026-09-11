@@ -169,6 +169,25 @@ function fixtureEntries(prefix = '') {
   return result
 }
 
+// Windows 自带压缩（资源管理器"压缩到 ZIP" / Compress-Archive）用反斜杠作分隔符。
+const WINDOWS_SEPARATOR = String.fromCharCode(92)
+const toWindowsEntryName = (posixName) => posixName.split('/').join(WINDOWS_SEPARATOR)
+
+/** 原位改写 ZIP 条目名（新旧长度必须一致），不触碰压缩数据与 CRC。 */
+function renameZipEntry(zipBuffer, from, to) {
+  const out = Buffer.from(zipBuffer)
+  const find = Buffer.from(from)
+  const repl = Buffer.from(to)
+  if (find.length !== repl.length) throw new Error(`条目名长度必须一致：${from} -> ${to}`)
+  const localOffset = out.indexOf(find)
+  if (localOffset === -1) throw new Error(`local header 未找到条目名：${from}`)
+  out.set(repl, localOffset)
+  const centralOffset = out.indexOf(find, localOffset + 1)
+  if (centralOffset === -1) throw new Error(`central directory 未找到条目名：${from}`)
+  out.set(repl, centralOffset)
+  return out
+}
+
 test('ZIP 预览返回 parser DTO 并覆盖为快照 token，重复读取不写正式数据', async () => {
   const preview = await createProductionPackagePreview({ zip: await zipEntries(fixtureEntries()), owner: 'tenant:user-a' })
   assert.equal(preview.status, 'ready')
@@ -216,6 +235,28 @@ test('单层包根可解析，路径穿越和根目录歧义在 parser 前阻断
   await assert.rejects(() => createProductionPackagePreview({ zip: traversal, owner: 'u' }), (error) => ['PACKAGE_ARCHIVE_PATH_INVALID', 'PACKAGE_ARCHIVE_INVALID'].includes(error.code))
   const ambiguous = await zipEntries([['a/drama-package.md', 'x'], ['b/source-manifest.md', 'x']])
   await assert.rejects(() => createProductionPackagePreview({ zip: ambiguous, owner: 'u' }), (error) => error.code === 'PACKAGE_ARCHIVE_ROOT_AMBIGUOUS')
+})
+
+test('Windows 自带压缩的 ZIP（反斜杠条目名）规范化后可用，路径穿越仍被拒绝', async () => {
+  // Issue #120：反斜杠条目名过去被 yauzl 的 strictFileNames 在
+  // normalizeEntryName 之前拒绝，导致合法生产包返回不可操作的"ZIP 解压失败"。
+  const mixed = renameZipEntry(await zipEntries(fixtureEntries()), 'episodes/001.md', toWindowsEntryName('episodes/001.md'))
+  const preview = await createProductionPackagePreview({ zip: mixed, owner: 'tenant:windows-zip' })
+  assert.equal(preview.status, 'ready')
+  assert.equal(preview.can_confirm, true)
+  assert.equal(preview.episodes.length, 2)
+  assert.equal(preview.package.files.some((file) => file.path === 'episodes/001.md'), true, '条目名必须规范化回 POSIX /')
+  assert.equal(preview.package.files.some((file) => file.path.includes(WINDOWS_SEPARATOR)), false)
+
+  // 放开 strictFileNames 不等于放宽安全：反斜杠形式的穿越仍必须被拒绝。
+  // yauzl 在非严格模式下会先把 `\` 规范化为 `/` 再做宽松校验，因此 `..\x`
+  // 会在 yauzl 层被拦下（包成 PACKAGE_ARCHIVE_INVALID）；若未来该行为变化，
+  // normalizeEntryName 的 `..` 段检查会以 PACKAGE_ARCHIVE_PATH_INVALID 兜底。
+  const traversal = renameZipEntry(await zipEntries([['safe', 'x']]), 'safe', toWindowsEntryName('../x'))
+  await assert.rejects(
+    () => createProductionPackagePreview({ zip: traversal, owner: 'u' }),
+    (error) => ['PACKAGE_ARCHIVE_PATH_INVALID', 'PACKAGE_ARCHIVE_INVALID'].includes(error.code),
+  )
 })
 
 test('嵌套归档、超大上传和快照不存在返回稳定错误码', async () => {
