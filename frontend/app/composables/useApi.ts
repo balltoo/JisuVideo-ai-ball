@@ -186,7 +186,7 @@ async function productionPackagePreviewReq<T = any>(file: File): Promise<T> {
 export const productionPackageAPI = {
   preview: (file: File) => productionPackagePreviewReq(file),
   getPreview: (token: string) => api.get(`/production-packages/preview/${encodeURIComponent(token)}`),
-  confirm: (data: { preview_token: string; package_fingerprint: string; validation_fingerprint: string; idempotency_key: string }) => api.post('/production-packages/import/confirm', data),
+  confirm: (data: { preview_token: string; target_mode: string; package_fingerprint: string; validation_fingerprint: string; idempotency_key: string }) => api.post('/production-packages/import/confirm', data),
 }
 
 export const uploadAPI = {

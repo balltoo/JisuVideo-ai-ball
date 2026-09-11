@@ -814,6 +814,9 @@ function formatProductionPackageError(error, fallback) {
     PACKAGE_PREVIEW_EXPIRED: '预览已过期，请重新上传 ZIP 后再确认。',
     PACKAGE_SNAPSHOT_MISMATCH: '预览内容已变化，请重新上传 ZIP，避免导入错误版本。',
     PACKAGE_IMPORT_IN_PROGRESS: '导入正在处理中，请稍候；不要生成新的幂等键重复提交。',
+    IDEMPOTENCY_KEY_REUSED: '同一幂等键已绑定另一份生产包或目标模式，请重新上传并重新发起导入。',
+    PACKAGE_TARGET_UNSUPPORTED: '当前版本只支持导入为新建项目，请重新确认生产包后重试。',
+    // 兼容尚未升级到契约错误码的后端
     PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT: '本次幂等键已用于其他生产包，请重新上传并重新发起导入。',
     PACKAGE_IMPORT_FAILED: '导入失败且未创建完整项目；请点“返回重新选择”重新上传，以使用新的幂等键。',
   }
@@ -830,6 +833,7 @@ async function confirmProductionPackage() {
       preview_token: preview.preview_token,
       package_fingerprint: preview.package.package_fingerprint,
       validation_fingerprint: preview.package.validation_fingerprint,
+      target_mode: preview.target_mode || 'new_project',
       idempotency_key: productionPackageIdempotencyKey.value || idempotencyKey(),
     })
     if (!result?.drama_id) throw new Error('导入已返回，但没有找到新项目编号')

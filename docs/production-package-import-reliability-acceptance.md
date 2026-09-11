@@ -41,25 +41,26 @@ node --import tsx/esm --test --test-force-exit tests/production-package-import-f
 | A3 | `POST /api/v1/production-packages/import/confirm` | HTTP | `401 PACKAGE_PREVIEW_UNAUTHORIZED` | **缺陷 1（阻塞）** |
 | A4 | 同一包、同参数直连 `confirmProductionPackageImport` | 服务层 | `{"status":"completed","replayed":false}` | 业务层正常 → 缺陷 1 定位于认证层 |
 | R1 | 相同幂等键重放 | 服务层 | 首次 `replayed:false`；重放 `replayed:true` 且 `drama_id` 相同；`dramas +1` | 通过 |
-| R2 | 相同 key 换包冲突 | 服务层 | `409 PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT`；`dramas +0` | 通过 |
+| R2 | 相同 key 换包冲突 | 服务层 | `409 IDEMPOTENCY_KEY_REUSED`；`dramas +0` | 通过 |
 | R3 | 并发确认（5 并发、同 key 同指纹） | 服务层 | 5 次全为 `completed`/`replayed:false`；幂等表仅 1 行；`dramas +5`；**4 个孤儿项目** | **缺陷 2** |
 | R4 | 快照过期 | 服务层 | `410 PACKAGE_PREVIEW_EXPIRED`；快照行回收至 0 | 通过 |
 | R5 | 快照篡改（`upload.zip` 被替换） | 服务层 | `409 PACKAGE_SNAPSHOT_MISMATCH` | 通过 |
 | R6 | Confirm 写入阶段失败 | 服务层 | `500 PACKAGE_IMPORT_FAILED`；幂等行收口 `failed` 且 `error_json` 可诊断；`dramas +0`；同 key 重放恒 `failed`；换 key 重试 `completed` | 通过（含 1 项语义待确认，见 §3） |
 | R7 | 数据清洁（成功路径） | 服务层 | `episodes/characters/scenes = 2/2/2`（与包一致）；`source_versions = 1`；孤儿 `episode_characters`、`episode_scenes` 均为 0 | 通过 |
 | R8 | Preview 租约与清理边界 | 服务层 | 过期快照回收 8 行、残留 0；孤儿目录回收 1 个 | 通过 |
-| M1 | `target_mode` 四项逻辑身份（契约 §5.2/§5.3） | — | **未覆盖**：Confirm 链路无 `target_mode` 输入，`production_package_imports` 无该列；已挂账 Issue #117 | **未覆盖（阻塞）** |
+| M1 | `target_mode` 四项逻辑身份（契约 §5.2/§5.3） | 服务层 | 缺陷基线 `6384cec` 未覆盖（无 `target_mode` 输入、无该列、错误码未用 `IDEMPOTENCY_KEY_REUSED`）；已由 Issue #117 补齐，复验见 §7 | 通过（2026-09-12 补齐） |
 | T1 | `npm run typecheck` | — | 通过 | — |
 | T2 | `npm test`（全量，真实 MySQL，基线 `6384cec`） | — | **0 fail，0 skipped**（该基线当时总数 280） | — |
 
 > 上表为缺陷发现时的实测（基线 `6384cec`）；A3/R3 对应两个缺陷。修复后健康目标复验见 §6。
 >
-> **契约验收范围的诚实边界（M1）**：契约 §5.2/§5.3 要求的四项逻辑身份
+> **M1 的契约边界（已关闭）**：契约 §5.2/§5.3 要求的四项逻辑身份
 > `confirm_idempotency_key + package_fingerprint + validation_fingerprint + target_mode`
-> 在本报告对应的实现中**只有前两项被纳入比对**；`target_mode` 未进入 Confirm 链路
-> （`ConfirmImportInput` 无该字段、`production_package_imports` 无该列、错误码也未使用
-> 契约定义的 `IDEMPOTENCY_KEY_REUSED`）。因此本报告**不能**被读作"含 `target_mode` 的
-> 契约验收已完成"。该缺口已拆出为独立阻塞任务，见 §6「遗留待办」。
+> 在缺陷基线 `6384cec` 上只有前两项被纳入比对。该缺口曾拆出为独立阻塞任务 **Issue #117**，
+> 已于 2026-09-12 落地：`ConfirmImportInput` 增加 `targetMode`、
+> `production_package_imports` 增加 `target_mode` 列（含存量回填）、身份比对四项化，
+> 同 key 换 `package_fingerprint` / `validation_fingerprint` / `target_mode` 统一返回契约
+> 定义的 `IDEMPOTENCY_KEY_REUSED`。复验证据见 §7。
 
 ## 3. 发现的两个 P0 缺陷
 
@@ -111,7 +112,7 @@ node --import tsx/esm --test --test-force-exit tests/production-package-import-f
 | HTTP 主链路（A1/A2） | `200 completed` + `replayed:false`；同 key 二次 `200` + `replayed:true` + 同一 `drama_id`；创建结果可查询 |
 | 白名单收敛 | 同 owner `GET /preview/:token`=200；`POST /preview/:token`、`GET /preview`、`PUT /import/confirm` 均 401 |
 | R3 并发 5× 同 key | `created=1`、唯一 drama、孤儿 0；其余 4 个全部 `409 PACKAGE_IMPORT_IN_PROGRESS` |
-| R1/R2/R4–R8 | 均通过（同 key 幂等 1 行、换包 409、过期 410 + 清理、篡改 409、失败 `failed` 收口且无半成品、数据清洁无孤儿、租约/孤儿目录回收） |
+| R1/R2/R4–R8 | 均通过（同 key 幂等 1 行、换包 409 `IDEMPOTENCY_KEY_REUSED`、过期 410 + 清理、篡改 409、失败 `failed` 收口且无半成品、数据清洁无孤儿、租约/孤儿目录回收） |
 | typecheck / npm test | 通过；**0 fail，0 skipped**（含 e2e A1/A2、reliability R1–R8、fix 回归 4 用例） |
 
 ### 隔离说明
@@ -146,11 +147,45 @@ CI 日志中）。本机用与 CI 完全相同的 node 22.23.2 复跑全量得�
 
 - "**可信网关/BFF 如何代表浏览器签名**"的接线（Issue #112，主账号认领中）不是本修复范围。
 - 失败后同 key 恒定重放 `failed` 语义已确认可接受；前端（#107）需在失败时引导用户"重新上传/重新发起"（新 key）。
-- **`target_mode` 四项逻辑身份（阻塞，见 §2 M1）**：契约 §5.2/§5.3 要求的
-  `confirm_idempotency_key + package_fingerprint + validation_fingerprint + target_mode`
-  目前只实现了前两项比对；`target_mode` 未进入 `ConfirmImportInput`、
-  `production_package_imports` schema 与身份比对，"不支持的 target mode 阻断"也不存在。
-  该任务需要改 `backend/src/**`（类型、服务实现、`mysql-schema.ts` 迁移与存量回填），
-  超出本 PR 声明的修改范围，已拆出为独立阻塞任务 **Issue #117**
-  （`[BLOCKER] Confirm 链路缺失 target_mode`，labels `status:blocked` / `type:task`）单独推进；
-  在其落地前，本报告的验收范围**不含**含 `target_mode` 的契约语义。
+- ~~**`target_mode` 四项逻辑身份（阻塞，见 §2 M1）**~~ **已关闭**：Issue #117 于 2026-09-12 落地，复验证据见 §7。
+
+## 7. Issue #117 补齐：`target_mode` 四项逻辑身份（2026-09-12）
+
+- 任务：Issue #117（`[BLOCKER] Confirm 链路缺失 target_mode：契约 §5.2/§5.3 未覆盖`）
+- 实施账号 / 线：`Aibrother258` / `production-reliability`
+- 实施分支：`fix/issue-117-confirm-target-mode`；基线：`master @ 46c1180`（PR #115 合入后）
+
+### 7.1 变更
+
+| 层 | 变更 |
+| --- | --- |
+| 服务 | `ConfirmImportInput` 增加 `targetMode`；幂等身份比对由两项扩展为契约四项（`package_fingerprint` + `validation_fingerprint` + `target_mode`）；支持性校验放在原子 claim 之后、`COMMIT` 之前 |
+| 错误码 | 同 key 换 `package_fingerprint` / `validation_fingerprint` / `target_mode` 统一返回 `IDEMPOTENCY_KEY_REUSED`（409）；不支持的 mode 返回 `PACKAGE_TARGET_UNSUPPORTED`（400） |
+| 数据库 | `production_package_imports` 增加 `target_mode VARCHAR(32) NOT NULL DEFAULT 'new_project'`；启动时经 `information_schema` 幂等补列，`DEFAULT` 回填存量行；Drizzle schema 同步 |
+| 路由 | Confirm 请求体透传 `target_mode` |
+| 前端 | Confirm 提交携带 `target_mode`；新增 `IDEMPOTENCY_KEY_REUSED` / `PACKAGE_TARGET_UNSUPPORTED` 文案映射（旧码保留兼容） |
+
+### 7.2 语义顺序（为何支持性校验必须晚于身份比对）
+
+契约同时要求两条，且表面互斥：
+
+- C3：Confirm 携带 `target_mode=update` → `PACKAGE_TARGET_UNSUPPORTED`；
+- T09：同一 key 换 `target_mode` → `IDEMPOTENCY_KEY_REUSED`。
+
+若在参数校验阶段就拒绝所有非 `new_project`，T09 会被 C3 抢先拦截，永远无法返回契约要求的
+`IDEMPOTENCY_KEY_REUSED`。因此实现为：**先按四项身份比对既有幂等记录**（不一致即
+`IDEMPOTENCY_KEY_REUSED`）；**首次 claim 之后、`COMMIT` 之前**才拒绝不支持的 mode，并在
+抛错时由既有 catch 回滚 claim。效果是既满足 T09，又保证 C3 零幂等残留、零业务写入。
+
+### 7.3 复验结果（本机真实 MySQL 8.4，隔离库）
+
+| 场景 | 复验结果 |
+| --- | --- |
+| M1 同 key 同指纹换 `target_mode` | `409 IDEMPOTENCY_KEY_REUSED`；幂等表仍 1 行；`dramas +0` |
+| M2 首次 `existing_project` / 未知 mode（`update`） | `400 PACKAGE_TARGET_UNSUPPORTED`；幂等表 0 行（claim 已回滚）；`dramas +0` |
+| M3 schema 迁移 | `target_mode` 列存在、`IS_NULLABLE=NO`、`COLUMN_DEFAULT=new_project` |
+| R2 回归 | 同 key 换包 → `409 IDEMPOTENCY_KEY_REUSED`（错误码随契约对齐） |
+| 定向 | `production-package-import-{e2e,reliability,fix,input}` 共 20 pass / 0 fail / 0 skipped |
+| 全量 | `npm run typecheck` 通过；`npm test` **293 pass / 0 fail / 0 skipped**（较基线 289 增加本任务 4 个用例） |
+
+> 说明：本报告 §6 的 CI 数字（279）为本任务之前的快照；本任务的 CI 数字以对应 PR 的 Actions 结果为准。

@@ -98,6 +98,7 @@ async function previewResponse(userId = 'user-fix') {
 
 const confirmBody = (token, preview, key) => JSON.stringify({
   preview_token: token,
+  target_mode: preview.target_mode || 'new_project',
   package_fingerprint: preview.package.package_fingerprint,
   validation_fingerprint: preview.package.validation_fingerprint,
   idempotency_key: key,
@@ -219,6 +220,7 @@ test('修复 2：并发相同幂等键只创建一个项目，其余重放或 40
     const results = await Promise.all(Array.from({ length: 5 }, () => confirmProductionPackageImport({
       token: preview.preview_token,
       owner: ownerKey,
+      targetMode: 'new_project',
       packageFingerprint: preview.package.package_fingerprint,
       validationFingerprint: preview.package.validation_fingerprint,
       idempotencyKey: key,

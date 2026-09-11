@@ -101,6 +101,7 @@ async function previewPackage(userId = 'user-e2e') {
 
 const confirmPayload = (preview, key, token) => JSON.stringify({
   preview_token: token,
+  target_mode: preview.target_mode || 'new_project',
   package_fingerprint: preview.package.package_fingerprint,
   validation_fingerprint: preview.package.validation_fingerprint,
   idempotency_key: key,

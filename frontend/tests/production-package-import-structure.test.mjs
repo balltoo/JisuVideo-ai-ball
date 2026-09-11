@@ -23,6 +23,7 @@ test('production-package confirmation carries both fingerprints and an idempoten
   assert.match(page, /preview_token: preview\.preview_token/)
   assert.match(page, /package_fingerprint: preview\.package\.package_fingerprint/)
   assert.match(page, /validation_fingerprint: preview\.package\.validation_fingerprint/)
+  assert.match(page, /target_mode: preview\.target_mode/)
   assert.match(page, /idempotency_key: productionPackageIdempotencyKey\.value/)
 })
 
@@ -41,6 +42,8 @@ test('production-package errors preserve actionable retry guidance', () => {
   assert.match(page, /PACKAGE_PREVIEW_EXPIRED/)
   assert.match(page, /PACKAGE_SNAPSHOT_MISMATCH/)
   assert.match(page, /PACKAGE_IMPORT_IN_PROGRESS/)
+  assert.match(page, /IDEMPOTENCY_KEY_REUSED/)
+  assert.match(page, /PACKAGE_TARGET_UNSUPPORTED/)
   assert.match(page, /PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT/)
   assert.match(page, /PACKAGE_IMPORT_FAILED/)
   assert.match(page, /productionPackageError/)

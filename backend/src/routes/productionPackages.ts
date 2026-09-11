@@ -78,6 +78,7 @@ export function createProductionPackagesRouter(resolveIdentity: PreviewIdentityR
       const result = await confirmProductionPackageImport({
         token: String(body.preview_token || ''),
         owner: ownerOf(identity),
+        targetMode: String(body.target_mode || ''),
         packageFingerprint: String(body.package_fingerprint || ''),
         validationFingerprint: String(body.validation_fingerprint || ''),
         idempotencyKey: String(body.idempotency_key || ''),

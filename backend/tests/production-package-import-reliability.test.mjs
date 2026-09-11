@@ -100,12 +100,14 @@ test('R1 相同幂等键重放：只创建一个项目，重放返回同一结�
   const key = newKey('e2e-r1')
   const first = await confirmProductionPackageImport({
     token: preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
     packageFingerprint: preview.package.package_fingerprint,
     validationFingerprint: preview.package.validation_fingerprint,
     idempotencyKey: key,
   })
   const replay = await confirmProductionPackageImport({
     token: preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
     packageFingerprint: preview.package.package_fingerprint,
     validationFingerprint: preview.package.validation_fingerprint,
     idempotencyKey: key,
@@ -122,13 +124,14 @@ test('R1 相同幂等键重放：只创建一个项目，重放返回同一结�
   createdDramaIds.add(first.drama_id)
 })
 
-test('R2 相同 key 换包冲突：409 PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT 且不创建项目', async (t) => {
+test('R2 相同 key 换包冲突：409 IDEMPOTENCY_KEY_REUSED 且不创建项目', async (t) => {
   if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
   const userId = 'user-r2'
   const first = await makePreview(userId)
   const key = newKey('e2e-r2')
   await confirmProductionPackageImport({
     token: first.preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
     packageFingerprint: first.preview.package.package_fingerprint,
     validationFingerprint: first.preview.package.validation_fingerprint,
     idempotencyKey: key,
@@ -140,13 +143,14 @@ test('R2 相同 key 换包冲突：409 PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT 且�
   const second = await makePreview(userId, () => mutatedRoot)
   const error = await confirmProductionPackageImport({
     token: second.preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
     packageFingerprint: second.preview.package.package_fingerprint,
     validationFingerprint: second.preview.package.validation_fingerprint,
     idempotencyKey: key,
   }).then(() => null, (e) => e)
   const [importRows] = await pool.query('SELECT COUNT(*) AS c, MAX(drama_id) AS drama_id FROM production_package_imports WHERE idempotency_key = ?', [key])
   console.log('[R2]', JSON.stringify({ code: error?.code, status: error?.status, importRows: importRows[0].c, importDramaId: importRows[0].drama_id }))
-  assert.equal(error?.code, 'PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT')
+  assert.equal(error?.code, 'IDEMPOTENCY_KEY_REUSED')
   assert.equal(error?.status, 409)
   assert.equal(importRows[0].c, 1, '冲突后该幂等键仍只对应一行（未创建新项目）')
 })
@@ -158,6 +162,7 @@ test('R3 并发确认：只有一个请求真正创建项目，其余为 409 或
   const key = newKey('e2e-r3')
   const results = await Promise.all(Array.from({ length: 5 }, () => confirmProductionPackageImport({
     token: preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
     packageFingerprint: preview.package.package_fingerprint,
     validationFingerprint: preview.package.validation_fingerprint,
     idempotencyKey: key,
@@ -270,6 +275,7 @@ test('R6 Confirm 中途失败：幂等记录收口为 failed 且可诊断，无�
   try {
     await confirmProductionPackageImport({
       token: preview.preview_token, owner: owner(userId),
+      targetMode: 'new_project',
       packageFingerprint: preview.package.package_fingerprint,
       validationFingerprint: preview.package.validation_fingerprint,
       idempotencyKey: key,
@@ -285,6 +291,7 @@ test('R6 Confirm 中途失败：幂等记录收口为 failed 且可诊断，无�
 
   const retrySameKey = await confirmProductionPackageImport({
     token: preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
     packageFingerprint: preview.package.package_fingerprint,
     validationFingerprint: preview.package.validation_fingerprint,
     idempotencyKey: key,
@@ -295,6 +302,7 @@ test('R6 Confirm 中途失败：幂等记录收口为 failed 且可诊断，无�
 
   const retryNewKey = await confirmProductionPackageImport({
     token: preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
     packageFingerprint: preview.package.package_fingerprint,
     validationFingerprint: preview.package.validation_fingerprint,
     idempotencyKey: newKey('e2e-r6-retry'),
@@ -310,6 +318,7 @@ test('R7 数据清洁：成功导入的数据完整且引用闭合；失败不�
   const { preview } = await makePreview(userId)
   const result = await confirmProductionPackageImport({
     token: preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
     packageFingerprint: preview.package.package_fingerprint,
     validationFingerprint: preview.package.validation_fingerprint,
     idempotencyKey: newKey('e2e-r7'),
@@ -343,6 +352,71 @@ test('R8 Preview 租约与清理边界：过期快照与孤儿目录被回收', 
   assert.equal(rows, 0)
   assert.ok(orphanRemoved >= 1, '孤儿目录应被回收')
   assert.equal(fs.existsSync(orphanDirectory), false)
+})
+
+test('M1 幂等身份四项化：同 key 同指纹换 target_mode → 409 IDEMPOTENCY_KEY_REUSED（契约 §5.2/§5.3 T09）', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const userId = 'user-m1'
+  const { preview } = await makePreview(userId)
+  const key = newKey('e2e-m1')
+  const first = await confirmProductionPackageImport({
+    token: preview.preview_token, owner: owner(userId),
+    targetMode: 'new_project',
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+    idempotencyKey: key,
+  })
+  assert.equal(first.status, 'completed')
+  createdDramaIds.add(first.drama_id)
+  const dramaBefore = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  const error = await confirmProductionPackageImport({
+    token: preview.preview_token, owner: owner(userId),
+    targetMode: 'existing_project',
+    packageFingerprint: preview.package.package_fingerprint,
+    validationFingerprint: preview.package.validation_fingerprint,
+    idempotencyKey: key,
+  }).then(() => null, (e) => e)
+  const [importRows] = await pool.query('SELECT COUNT(*) AS c, MAX(drama_id) AS drama_id FROM production_package_imports WHERE idempotency_key = ?', [key])
+  const dramaAfter = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+  console.log('[M1]', JSON.stringify({ code: error?.code, status: error?.status, importRows: importRows[0].c, dramaDelta: dramaAfter - dramaBefore }))
+  assert.equal(error?.code, 'IDEMPOTENCY_KEY_REUSED')
+  assert.equal(error?.status, 409)
+  assert.equal(importRows[0].c, 1, '身份冲突后该幂等键仍只对应一行')
+  assert.equal(dramaAfter - dramaBefore, 0, '身份冲突必须零写入')
+})
+
+test('M2 v0.1 目标模式支持性：existing_project / 未知 mode → 400 PACKAGE_TARGET_UNSUPPORTED 且零写入零残留', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  for (const [mode, userId] of [['existing_project', 'user-m2-existing'], ['update', 'user-m2-unknown']]) {
+    const { preview } = await makePreview(userId)
+    const key = newKey(`e2e-m2-${mode}`)
+    const dramaBefore = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+    const error = await confirmProductionPackageImport({
+      token: preview.preview_token, owner: owner(userId),
+      targetMode: mode,
+      packageFingerprint: preview.package.package_fingerprint,
+      validationFingerprint: preview.package.validation_fingerprint,
+      idempotencyKey: key,
+    }).then(() => null, (e) => e)
+    const rows = (await pool.query('SELECT COUNT(*) AS c FROM production_package_imports WHERE idempotency_key = ?', [key]))[0][0].c
+    const dramaAfter = (await pool.query('SELECT COUNT(*) AS c FROM dramas'))[0][0].c
+    console.log('[M2]', JSON.stringify({ mode, code: error?.code, status: error?.status, importRows: rows, dramaDelta: dramaAfter - dramaBefore }))
+    assert.equal(error?.code, 'PACKAGE_TARGET_UNSUPPORTED', `${mode} 必须被阻断`)
+    assert.equal(error?.status, 400)
+    assert.equal(rows, 0, `${mode} 被拒后不得留下 processing/failed 幂等残留`)
+    assert.equal(dramaAfter - dramaBefore, 0, `${mode} 被拒后不得写入业务数据`)
+  }
+})
+
+test('M3 schema 迁移：production_package_imports.target_mode 存在、非空且默认 new_project', async (t) => {
+  if (!hasMySql) { t.skip('requires the CI MySQL service'); return }
+  const [columns] = await pool.query(
+    "SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'production_package_imports' AND COLUMN_NAME = 'target_mode'",
+  )
+  console.log('[M3]', JSON.stringify(columns[0]))
+  assert.equal(columns.length, 1, 'target_mode 列必须存在')
+  assert.equal(columns[0].IS_NULLABLE, 'NO', 'target_mode 必须非空')
+  assert.equal(String(columns[0].COLUMN_DEFAULT).replaceAll("'", ''), 'new_project', 'target_mode 默认必须是 new_project')
 })
 
 after(async () => {

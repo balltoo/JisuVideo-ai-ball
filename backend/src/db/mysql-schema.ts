@@ -358,6 +358,7 @@ export const mysqlSchemaStatements = [
     preview_token VARCHAR(64) NOT NULL,
     package_fingerprint VARCHAR(128) NOT NULL,
     validation_fingerprint VARCHAR(128) NOT NULL,
+    target_mode VARCHAR(32) NOT NULL DEFAULT 'new_project',
     status VARCHAR(32) NOT NULL,
     drama_id INT,
     error_json LONGTEXT,
@@ -395,6 +396,15 @@ export async function initMySqlSchema(pool: Pool) {
   // bare 64-character digests.  MODIFY also upgrades a database created by
   // an early preview build that used CHAR(64).
   await pool.query('ALTER TABLE preview_package_snapshots MODIFY COLUMN package_fingerprint VARCHAR(128) NOT NULL, MODIFY COLUMN validation_fingerprint VARCHAR(128) NOT NULL')
+  // Issue #117 / 契约 §5.3 第 3 条：幂等记录最小列必须含 target_mode。
+  // CREATE TABLE IF NOT EXISTS 不给已有表补列；ADD COLUMN ... NOT NULL DEFAULT
+  // 由 MySQL 用默认值回填存量行（历史记录全部是 v0.1 的 new_project）。
+  const [targetModeColumns] = await pool.query<any[]>(
+    "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'production_package_imports' AND COLUMN_NAME = 'target_mode'",
+  )
+  if (!targetModeColumns.length) {
+    await pool.query("ALTER TABLE production_package_imports ADD COLUMN target_mode VARCHAR(32) NOT NULL DEFAULT 'new_project' AFTER validation_fingerprint")
+  }
   // ── v0.4 原文版本表（S1-1 / Issue #71，契约 §6.1 / §6.3）────────────────────
   // 字段类型一律以契约 §6.1 字段表为准：LONGTEXT 而非 TEXT、VARCHAR(64) 而非 CHAR(64)/TIMESTAMP、
   // INT 而非 BIGINT、diff/stats 用 LONGTEXT/TEXT 而非 MySQL JSON 列（对齐 plan_json 的既有写法）。

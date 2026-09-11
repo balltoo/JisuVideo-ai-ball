@@ -8,10 +8,21 @@ import { extractProductionPackageUploadForConfirm, getProductionPackageSnapshotF
 export type ConfirmImportInput = {
   token: string
   owner: string
+  targetMode: string
   packageFingerprint: string
   validationFingerprint: string
   idempotencyKey: string
 }
+
+/**
+ * 契约 §3 / §5.4 第 1 条：v0.1 只允许新建项目。
+ * 解析器可以返回 `target_mode=existing_project` 的阻断诊断，但 Confirm 不得对
+ * 已有项目执行写入或自动匹配。
+ */
+const SUPPORTED_TARGET_MODES = new Set(['new_project'])
+
+/** 契约 §5.2 逻辑身份四元组中随请求提交的三项（幂等 key 由调用方单独传入）。 */
+type ImportIdentity = Pick<ConfirmImportInput, 'targetMode' | 'packageFingerprint' | 'validationFingerprint'>
 
 export class ProductionPackageImportError extends Error {
   constructor(readonly code: string, message: string, readonly status = 400, readonly details?: unknown) { super(message) }
@@ -28,13 +39,25 @@ export function validateProductionPackageImportInput(input: ConfirmImportInput) 
   if (!/^(?:pv_)?[A-Za-z0-9_-]{24,128}$/.test(input.token)) throw new ProductionPackageImportError('PACKAGE_IMPORT_INVALID', 'preview_token 格式无效')
   if (!/^sha256:[0-9a-f]{64}$/.test(input.packageFingerprint) || !/^sha256:[0-9a-f]{64}$/.test(input.validationFingerprint)) throw new ProductionPackageImportError('PACKAGE_IMPORT_INVALID', '指纹格式无效')
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.idempotencyKey)) throw new ProductionPackageImportError('PACKAGE_IMPORT_INVALID', 'idempotency_key 格式无效')
+  // 契约 §5.2：Confirm 必须携带 target_mode。这里只做格式校验；支持性校验
+  // （PACKAGE_TARGET_UNSUPPORTED）必须晚于幂等身份比对，否则「同一 key 换
+  // target_mode」会先被拒成不支持的 mode，无法返回契约 §5.3 T09 要求的
+  // IDEMPOTENCY_KEY_REUSED（顺序见 confirmProductionPackageImport）。
+  if (typeof input.targetMode !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(input.targetMode)) throw new ProductionPackageImportError('PACKAGE_IMPORT_INVALID', 'target_mode 格式无效')
 }
 
-async function existingImport(pool: Pool, owner: string, key: string, packageFingerprint: string, validationFingerprint: string) {
+async function existingImport(pool: Pool, owner: string, key: string, identity: ImportIdentity) {
   const [rows] = await pool.query<any[]>('SELECT * FROM production_package_imports WHERE idempotency_owner = ? AND idempotency_key = ? LIMIT 1', [owner, key])
   const row = rows[0]
   if (!row) return undefined
-  if (String(row.package_fingerprint) !== packageFingerprint || String(row.validation_fingerprint) !== validationFingerprint) throw new ProductionPackageImportError('PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT', '同一个幂等 key 不能用于另一份生产包', 409)
+  // 契约 §5.2：逻辑身份 = confirm_idempotency_key + package_fingerprint +
+  // validation_fingerprint + target_mode。任一项不一致都必须返回
+  // IDEMPOTENCY_KEY_REUSED，不得静默重放旧结果。
+  if (String(row.package_fingerprint) !== identity.packageFingerprint
+    || String(row.validation_fingerprint) !== identity.validationFingerprint
+    || String(row.target_mode) !== identity.targetMode) {
+    throw new ProductionPackageImportError('IDEMPOTENCY_KEY_REUSED', '同一个幂等 key 已绑定另一组 package/validation 指纹或目标模式', 409)
+  }
   if (row.status === 'completed') return { status: 'completed', drama_id: Number(row.drama_id), import_id: Number(row.id), replayed: true }
   if (row.status === 'processing') throw new ProductionPackageImportError('PACKAGE_IMPORT_IN_PROGRESS', '该导入正在处理中，请稍后重试', 409)
   return { status: 'failed', import_id: Number(row.id), error: row.error_json ? JSON.parse(String(row.error_json)) : null, replayed: true }
@@ -110,7 +133,7 @@ export async function confirmProductionPackageImport(input: ConfirmImportInput) 
   // Do not connect to MySQL merely because the preview router module was
   // imported. Confirm is the only operation in this module that needs it.
   const { pool } = await import('../db/index.js')
-  const prior = await existingImport(pool, input.owner, input.idempotencyKey, input.packageFingerprint, input.validationFingerprint)
+  const prior = await existingImport(pool, input.owner, input.idempotencyKey, input)
   if (prior) return prior
   const snapshot = await getProductionPackageSnapshotForConfirm(input.token, input.owner, { packageFingerprint: input.packageFingerprint, validationFingerprint: input.validationFingerprint })
   const bytes = snapshot.uploadBytes
@@ -123,8 +146,8 @@ export async function confirmProductionPackageImport(input: ConfirmImportInput) 
     let row: any
     try {
       const [insertResult] = await reservation.execute(
-        `INSERT INTO production_package_imports (idempotency_owner, idempotency_key, preview_token, package_fingerprint, validation_fingerprint, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'processing', ?, ?)`,
-        [input.owner, input.idempotencyKey, input.token, input.packageFingerprint, input.validationFingerprint, ts(), ts()],
+        `INSERT INTO production_package_imports (idempotency_owner, idempotency_key, preview_token, package_fingerprint, validation_fingerprint, target_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'processing', ?, ?)`,
+        [input.owner, input.idempotencyKey, input.token, input.packageFingerprint, input.validationFingerprint, input.targetMode, ts(), ts()],
       )
       // 原子 claim：INSERT 成功即本请求是唯一 owner。
       // 不再依赖 ON DUPLICATE KEY UPDATE 的 affectedRows === 1 —— Issue #108 实证该判定
@@ -141,9 +164,11 @@ export async function confirmProductionPackageImport(input: ConfirmImportInput) 
       row = rows[0]
       if (!row) throw new ProductionPackageImportError('PACKAGE_IMPORT_FAILED', '无法读取导入幂等记录', 500)
       importId = Number(row.id)
-      if (String(row.package_fingerprint) !== input.packageFingerprint || String(row.validation_fingerprint) !== input.validationFingerprint) {
+      if (String(row.package_fingerprint) !== input.packageFingerprint
+        || String(row.validation_fingerprint) !== input.validationFingerprint
+        || String(row.target_mode) !== input.targetMode) {
         await reservation.commit()
-        throw new ProductionPackageImportError('PACKAGE_IMPORT_IDEMPOTENCY_CONFLICT', '同一个幂等 key 不能用于另一份生产包', 409)
+        throw new ProductionPackageImportError('IDEMPOTENCY_KEY_REUSED', '同一个幂等 key 已绑定另一组 package/validation 指纹或目标模式', 409)
       }
       if (row.status === 'processing') { await reservation.commit(); throw new ProductionPackageImportError('PACKAGE_IMPORT_IN_PROGRESS', '该导入正在处理中，请稍后重试', 409) }
       if (row.status === 'completed') { await reservation.commit(); return { status: 'completed', drama_id: Number(row.drama_id), import_id: importId, replayed: true } }
@@ -152,6 +177,11 @@ export async function confirmProductionPackageImport(input: ConfirmImportInput) 
     }
     if (!row) throw new ProductionPackageImportError('PACKAGE_IMPORT_FAILED', '无法创建导入幂等记录', 500)
     importId = Number(row.id)
+    // 契约 §5.3 T09 / C3：支持性校验必须晚于幂等身份比对。走到这里说明本次
+    // (owner, key) 是首次 claim、身份不存在冲突，此时才拒绝 v0.1 不支持的
+    // target_mode；在 COMMIT 之前抛错会由 catch 回滚 claim，不留 processing /
+    // failed 残留，也不触碰业务表。
+    if (!SUPPORTED_TARGET_MODES.has(input.targetMode)) throw new ProductionPackageImportError('PACKAGE_TARGET_UNSUPPORTED', 'v0.1 只支持新建项目（new_project）', 400)
     // A connection loss while COMMIT is in flight is ambiguous: MySQL may
     // already have persisted the processing row. Mark the reservation as
     // eligible for the best-effort failed transition before sending COMMIT so
