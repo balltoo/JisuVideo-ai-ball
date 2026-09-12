@@ -522,7 +522,14 @@
             </template>
           </Field>
           <Field label="API Key">
-            <input v-model="cfgForm.api_key" class="input" type="password" placeholder="sk-..." />
+            <div class="model-input-row">
+              <input v-model="cfgForm.api_key" class="input" type="password" :disabled="cfgClearKey" :placeholder="cfgHasSavedKey ? '已保存密钥，留空表示不修改' : 'sk-...'" />
+              <button v-if="cfgHasSavedKey && !cfgClearKey" class="btn btn-sm" type="button" @click="markClearSavedKey">清除已保存密钥</button>
+            </div>
+            <template #hint>
+              <template v-if="cfgClearKey">已标记清除：保存后将删除该配置的密钥。</template>
+              <template v-else-if="cfgHasSavedKey">出于安全考虑不回显已保存密钥：留空保存即保持不变，如需更换请直接输入新密钥。</template>
+            </template>
           </Field>
           <Field label="Base URL">
             <input v-model="cfgForm.base_url" class="input" placeholder="https://..." />
@@ -867,6 +874,10 @@ const cfgTestResult = ref(null)
 const cfgFetchingModels = ref(false)
 const fetchedModels = ref([])
 const selectedFetchedModels = ref(new Set())
+// 编辑已有配置时，出参已脱敏（Issue #127）：不回填密钥，留空表示不修改。
+const cfgHasSavedKey = ref(false)
+// 「清除已保存密钥」意图：保存时发 api_key: null（服务端仅对显式 null 清空）
+const cfgClearKey = ref(false)
 const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0, temperature: '' })
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
 const providers = ['gemini', 'openai', 'volcengine', 'minimax', 'autodl']
@@ -966,6 +977,8 @@ async function toggleCfg(c) { await aiConfigAPI.update(c.id, { is_active: !c.is_
 async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'); loadCfgs() }
 function startAddCfg(t) {
   cfgEditId.value = null
+  cfgHasSavedKey.value = false
+  cfgClearKey.value = false
   cfgTestResult.value = null
   fetchedModels.value = []
   selectedFetchedModels.value = new Set()
@@ -976,13 +989,16 @@ function startAddCfg(t) {
 }
 function startEditCfg(c) {
   cfgEditId.value = c.id
+  // 出参已脱敏（Issue #127）：不回填密钥，留空保存表示不修改；用 c.api_key 仅判断"是否已配置"。
+  cfgHasSavedKey.value = Boolean(c.api_key)
+  cfgClearKey.value = false
   cfgTestResult.value = null
   fetchedModels.value = []
   selectedFetchedModels.value = new Set()
   Object.assign(cfgForm, {
     name: c.name || '',
     provider: c.provider,
-    api_key: c.api_key || '',
+    api_key: '',
     base_url: c.base_url || '',
     modelStr: fmtModel(c.model),
     service_type: c.service_type,
@@ -1018,6 +1034,7 @@ async function fetchModels() {
   cfgFetchingModels.value = true
   try {
     const res = await aiConfigAPI.models({
+      id: cfgEditId.value || undefined,   // 编辑已有配置时由服务端回退库中地址与密钥
       service_type: cfgForm.service_type,
       provider: cfgForm.provider,
       api_key: cfgForm.api_key,
@@ -1059,6 +1076,8 @@ function startImageDraftFromSelection() {
   }
   // 仅预填草稿并打开对话框，由用户确认后保存；取消则完全不落库
   cfgEditId.value = null
+  cfgHasSavedKey.value = false
+  cfgClearKey.value = false
   cfgTestResult.value = null
   Object.assign(cfgForm, {
     name: '',
@@ -1073,8 +1092,16 @@ function startImageDraftFromSelection() {
   cfgDialog.value = true
   toast.success('已预填图片服务草稿，请核对后保存')
 }
+/** 标记清除已保存密钥：保存时发 null，服务端仅对显式 null 清空（Issue #127 复核 P2-3）。 */
+function markClearSavedKey() {
+  cfgClearKey.value = true
+  cfgHasSavedKey.value = false
+  cfgForm.api_key = ''
+  toast.info('保存后将清除该配置的密钥')
+}
 async function testDraftCfg() {
   await testCfgPayload({
+    id: cfgEditId.value || undefined,   // 编辑已有配置时由服务端回退库中地址与密钥
     service_type: cfgForm.service_type,
     provider: cfgForm.provider,
     api_key: cfgForm.api_key,
@@ -1083,11 +1110,15 @@ async function testDraftCfg() {
   })
 }
 async function testExistingCfg(c) {
+  // 卡片级「测试」固定使用库中已保存的地址与密钥：startEditCfg 会重置表单，
+  // 因此这里的 api_key 必然为空、由服务端回退（不依赖表单残留值）。
+  // 如需用新密钥或新地址验证，请在对话框内输入后点「测试连接」。
   startEditCfg(c)
   await testCfgPayload({
+    id: c.id,
     service_type: c.service_type,
     provider: c.provider,
-    api_key: c.api_key || '',
+    api_key: cfgForm.api_key,
     base_url: c.base_url || '',
     model: Array.isArray(c.model) ? c.model : [],
   })
@@ -1100,7 +1131,7 @@ async function saveCfg() {
     toast.warning('Temperature 需为 0~2 的数字'); return
   }
   try {
-    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, temperature })
+    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgClearKey.value ? null : cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, temperature })
     else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, temperature })
     cfgDialog.value = false; toast.success('已保存'); loadCfgs()
     // 保存后跳到对应能力面板，让新配置立即可见

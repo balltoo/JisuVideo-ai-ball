@@ -21,10 +21,86 @@ function normalizeTemperature(v: any): number | null {
   return n
 }
 
-/** 把 settings JSON 中的 temperature 透出为顶层字段，便于前端直接读写 */
+/** 密钥掩码占位符（保持 ASCII，避免前端与日志出现编码差异） */
+const API_KEY_MASK = '********'
+
+/**
+ * 出参脱敏（Issue #127）：密钥一旦下发到浏览器，就会经 DevTools、截图、日志外泄。
+ * 阈值取 20：更短的密钥即使只保留头尾，暴露比例也过高（13 位时 77%、20 位时 50%）。
+ * 超过阈值后只保留前 6 位做粗辨认，不再保留尾号（同 provider 多 key 由 `name` 区分）；
+ * 空密钥返回空串，前端据此判断"无密钥"。
+ */
+export function maskApiKey(key: unknown): string {
+  const value = typeof key === 'string' ? key : ''
+  if (!value) return ''
+  if (value.length <= 20) return API_KEY_MASK
+  return `${value.slice(0, 6)}${API_KEY_MASK}`
+}
+
+/** 响应中的掩码被原样回传时，不得当作新密钥写库（防御纵深，Issue #127 复核 P2-2）。 */
+export function isMaskedApiKey(value: unknown): boolean {
+  return typeof value === 'string' && value.includes(API_KEY_MASK)
+}
+
+/** 探针密钥解析：请求未携带明文（出参脱敏后前端拿不到）时回退库中已存密钥。 */
+export function resolveProbeApiKey(provided: unknown, stored: unknown): string {
+  const value = typeof provided === 'string' ? provided : ''
+  if (value) return value
+  return typeof stored === 'string' ? stored : ''
+}
+
+export type ProbeTarget = {
+  serviceType: string
+  provider: string
+  baseUrl: string
+  apiKey: string
+  fromStoredConfig: boolean
+}
+
+/**
+ * 解析探针 / 模型拉取的目标（Issue #127 复核 P0）。
+ *
+ * - 未传 `id`：完全使用请求参数（与既有行为一致）；
+ * - 传了 `id`：密钥回退库中已存值，并且 **`base_url` / `provider` / `service_type` 一律取库中值**，
+ *   忽略请求体。否则任何未鉴权调用方（`/ai-configs/*` 当前没有鉴权中间件）都能让服务端
+ *   拿库中密钥去请求自己指定的地址，形成"不知道密钥也能取用密钥"的外泄原语。
+ */
+export async function resolveProbeTarget(body: any): Promise<ProbeTarget | null> {
+  const probeId = Number(body.id)
+  if (!Number.isFinite(probeId) || probeId <= 0) {
+    return {
+      serviceType: body.service_type,
+      provider: body.provider,
+      baseUrl: body.base_url,
+      apiKey: typeof body.api_key === 'string' ? body.api_key : '',
+      fromStoredConfig: false,
+    }
+  }
+  const [row] = await db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, probeId))
+  if (!row) return null
+  const rawProvided = typeof body.api_key === 'string' ? body.api_key : ''
+  // 掩码被回传时视为"未提供"，避免把掩码当密钥去请求上游。
+  const providedKey = isMaskedApiKey(rawProvided) ? '' : rawProvided
+  return {
+    serviceType: row.serviceType,
+    provider: row.provider ?? '',
+    baseUrl: row.baseUrl,
+    apiKey: resolveProbeApiKey(providedKey, row.apiKey),
+    fromStoredConfig: true,
+  }
+}
+
+/** 响应预览 / 提示里若出现本次使用的密钥，一律替换为掩码（防御上游原样回显）。 */
+function redactPreview(text: string, apiKey: string): string {
+  const preview = text.slice(0, 240)
+  return apiKey ? preview.replaceAll(apiKey, API_KEY_MASK) : preview
+}
+
+/** 把 settings JSON 中的 temperature 透出为顶层字段，便于前端直接读写；密钥一律脱敏。 */
 function withParsedFields(r: any) {
   return {
     ...toSnakeCase(r),
+    api_key: maskApiKey(r.apiKey),
     model: r.model ? JSON.parse(r.model) : [],
     temperature: parseConfigTemperature(r.settings),
   }
@@ -167,16 +243,19 @@ app.post('/models', async (c) => {
   if (!body.service_type || !body.provider || !body.base_url) {
     return badRequest(c, 'service_type, provider and base_url are required')
   }
-  if (!isOfficialProvider(body.service_type, body.provider)) {
+  // 同 /test：带 id 时地址/厂商/密钥取库中值，避免密钥被转发到请求方指定的地址（复核 P0）。
+  const target = await resolveProbeTarget(body)
+  if (!target) return notFound(c)
+  if (!isOfficialProvider(target.serviceType, target.provider)) {
     return badRequest(c, 'Unsupported service_type/provider')
   }
 
-  const provider = body.provider.toLowerCase()
+  const provider = target.provider.toLowerCase()
   if (provider === 'autodl') {
     return success(c, { ok: true, models: [], source: 'fixed', message: 'AutoDL 为固定 ComfyUI 工作流模型，无需拉取' })
   }
 
-  const probes = buildModelProbes(provider, body.base_url, body.api_key)
+  const probes = buildModelProbes(provider, target.baseUrl, target.apiKey)
   let lastError: string | null = null
   for (const probe of probes) {
     const probeUrl = redactUrl(probe.url)
@@ -289,8 +368,16 @@ app.post('/test', async (c) => {
     return badRequest(c, 'Unsupported service_type/provider')
   }
 
+  // 出参已脱敏（Issue #127）：带 id 时地址/厂商/密钥一律取库中值，
+  // 避免"未鉴权调用方让服务端拿库中密钥去请求任意地址"（复核 P0）。
+  const target = await resolveProbeTarget(body)
+  if (!target) return notFound(c)
+  if (!isOfficialProvider(target.serviceType, target.provider)) {
+    return badRequest(c, 'Unsupported service_type/provider')
+  }
+
   const model = Array.isArray(body.model) ? body.model[0] : body.model
-  const probe = buildProbe(body.service_type, body.provider, body.base_url, model, body.api_key)
+  const probe = buildProbe(target.serviceType, target.provider, target.baseUrl, model, target.apiKey)
   const probeUrl = redactUrl(probe.url)
 
   logTaskProgress('AIConfig', 'probe-start', {
@@ -322,7 +409,7 @@ app.post('/test', async (c) => {
             ? 'AutoDL 端点可达，但 Token 无效或未填写'
             : (verified ? '端点可访问，认证与路径基本正常' : '端点已响应，请根据状态码判断认证或路径是否正确'))
         : '端点未按预期响应，请检查 Base URL 和代理前缀',
-      response_preview: text.slice(0, 240),
+      response_preview: redactPreview(text, target.apiKey),
     }
     if (reachable) {
       logTaskSuccess('AIConfig', 'probe-done', {
@@ -385,7 +472,13 @@ app.put('/:id', async (c) => {
   if ('provider' in body) updates.provider = body.provider
   if ('name' in body) updates.name = body.name
   if ('base_url' in body) updates.baseUrl = body.base_url
-  if ('api_key' in body) updates.apiKey = body.api_key
+  if ('api_key' in body) {
+    // 出参已脱敏（Issue #127），前端无法回填明文：空串/未提供 = 不修改；
+    // 显式 null = 清空；把响应里的掩码原样回传也视为不修改（防御纵深）。
+    const nextKey = body.api_key
+    if (nextKey === null) updates.apiKey = ''
+    else if (typeof nextKey === 'string' && nextKey !== '' && !isMaskedApiKey(nextKey)) updates.apiKey = nextKey
+  }
   if ('model' in body) updates.model = JSON.stringify(body.model)
   if ('priority' in body) updates.priority = body.priority
   if ('is_active' in body) updates.isActive = body.is_active
