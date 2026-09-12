@@ -9,6 +9,50 @@ const DEFAULT_MAX_ENTRIES = 100_000
 const LOCK_STALE_MS = 60_000
 const LOCK_HEARTBEAT_MS = 10_000
 const MYSQL_LOCK_NAME = 'jisu:preview-auth:nonce-quota'
+/**
+ * 等待文件锁的上限（毫秒）。默认 10s，与 MySQL 路径 `GET_LOCK(?, 10)`（本文件 :54）以及
+ * 请求体预算的 10 秒语义保持一致；可用 PREVIEW_AUTH_NONCE_LOCK_TIMEOUT_MS 覆盖，
+ * 便于测试注入与运维调参。
+ * 超时抛 PREVIEW_NONCE_STORE_UNAVAILABLE —— 该错误码已被 preview-auth.ts 的
+ * verifyTrustedIdentity 捕获并映射为 503 PACKAGE_PREVIEW_AUTH_UNAVAILABLE，
+ * 因此超时走 fail-closed，不会退化成 500。
+ */
+const DEFAULT_LOCK_WAIT_TIMEOUT_MS = 10_000
+const LOCK_RETRY_MIN_MS = 5
+const LOCK_RETRY_MAX_MS = 50
+
+function lockWaitTimeoutMs(): number {
+  const parsed = Number(process.env.PREVIEW_AUTH_NONCE_LOCK_TIMEOUT_MS || DEFAULT_LOCK_WAIT_TIMEOUT_MS)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LOCK_WAIT_TIMEOUT_MS
+}
+
+/**
+ * 抢锁失败时应当退避重试的错误码。
+ *
+ * POSIX 下 `open(O_CREAT|O_EXCL)` 遇到已存在文件返回 EEXIST；但 Windows 下，
+ * 当目标路径处于 delete pending（上一持有者的 `rm` 已发起、句柄尚未完全释放）时，
+ * `CreateFile` 返回的是 ERROR_ACCESS_DENIED（映射为 EPERM / EACCES），句柄冲突还可能是 EBUSY。
+ * 这些都属于「已有竞争者持有或刚释放」的瞬时状态，必须退避重试而不是抛出——
+ * 否则并发抢锁会直接把瞬态竞争当成致命错误（Windows 上表现为预览接口 500）。
+ *
+ * 取舍说明：并入这些错误码后，个别**持久性**问题（目录权限真的不足、安全软件长期占用
+ * 锁文件）也会从「立即失败」变成「等待到上限后失败」。这是有意为之：文件锁属于鉴权边界，
+ * 宁可 fail-closed（超时 → 503）也不能把陌生错误当成「无竞争」而放行。
+ * 为便于现场归因，超时抛出前会 warn 出 lockPath、等待时长与最后一次错误码。
+ *
+ * 注意：这里**不能**断言「能执行到这里说明目录可写」——`fsp.mkdir(root, { recursive: true })`
+ * 对**已存在**的目录并不校验写权限。因此实现只以等待上限兜底，不假设权限一定正常。
+ */
+const LOCK_CONTENTION_ERRORS = new Set(['EEXIST', 'EPERM', 'EACCES', 'EBUSY'])
+
+/**
+ * 抢锁失败是否属于「瞬时竞争」（应退避重试而非抛出）。
+ * 导出用于回归测试锁定错误码集合：集合一旦被收窄回只认 EEXIST，
+ * Windows 下并发抢锁会重新出现 EPERM 崩溃（预览接口 500）。
+ */
+export function isLockContentionError(code: unknown): boolean {
+  return typeof code === 'string' && LOCK_CONTENTION_ERRORS.has(code)
+}
 
 function nonceRoot(): string {
   return process.env.PREVIEW_AUTH_NONCE_STORE_PATH || path.resolve(process.cwd(), 'data', 'preview-nonces')
@@ -71,6 +115,9 @@ async function consumePreviewNonceMySql(key: string, expiresAt: number): Promise
 
 async function withStoreLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = path.join(root, '.quota.lock')
+  const startedAt = Date.now()
+  const deadline = startedAt + lockWaitTimeoutMs()
+  let attempts = 0
   for (;;) {
     try {
       const lock = await fsp.open(lockPath, 'wx', 0o600)
@@ -100,7 +147,17 @@ async function withStoreLock<T>(root: string, fn: () => Promise<T>): Promise<T> 
         } catch { /* another contender already recovered/replaced the lock */ }
       }
     } catch (error: any) {
-      if (error?.code !== 'EEXIST') throw error
+      // 详见 LOCK_CONTENTION_ERRORS：EEXIST 是 POSIX 语义，EPERM/EACCES/EBUSY 是
+      // Windows 下 delete pending 与句柄冲突的表现，两者都是「等待竞争者释放」。
+      if (!isLockContentionError(error?.code)) throw error
+      if (Date.now() >= deadline) {
+        // 超时可能源于极端争用，也可能源于持久性问题（目录权限、安全软件长期占用）——
+        // 两者无法从错误码区分，因此先输出可归因线索，再 fail-closed（preview-auth → 503）。
+        console.warn(
+          `[preview-nonce] 等待文件锁超时（等待 ${Date.now() - startedAt}ms / 上限 ${lockWaitTimeoutMs()}ms / 尝试 ${attempts} 次）：lockPath=${lockPath} lastCode=${error?.code}`,
+        )
+        throw Object.assign(new Error('preview nonce quota lock unavailable'), { code: 'PREVIEW_NONCE_STORE_UNAVAILABLE' })
+      }
       try {
         const stat = await fsp.stat(lockPath)
         if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
@@ -125,7 +182,9 @@ async function withStoreLock<T>(root: string, fn: () => Promise<T>): Promise<T> 
       } catch (statError: any) {
         if (statError?.code !== 'ENOENT') throw statError
       }
-      await sleep(5)
+      attempts += 1
+      // 轻量递增退避（5ms → 上限 50ms）：避免等待窗口内高频 stat/重试
+      await sleep(Math.min(LOCK_RETRY_MIN_MS * attempts, LOCK_RETRY_MAX_MS))
     }
   }
 }
