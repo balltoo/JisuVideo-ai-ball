@@ -2,7 +2,11 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { extractReadableText } from '../src/services/source-import.ts'
-import { splitSourceIntoEpisodes } from '../src/services/episode-planning.ts'
+import {
+  defaultEpisodeCount,
+  splitSourceIntoEpisodes,
+  stripEpisodeNumberPrefix,
+} from '../src/services/episode-planning.ts'
 
 const root = new URL('..', import.meta.url)
 const read = (path) => readFileSync(new URL(path, root), 'utf8')
@@ -39,6 +43,43 @@ test('oversized source is rejected explicitly instead of being silently truncate
     () => extractReadableText('字'.repeat(200_001), 'text/plain'),
     /超过20万字.*未保存任何截断内容/,
   )
+})
+
+test('兜底集数按短剧节奏估算，不再把 2600 字原文算成 1 集', () => {
+  // 实测样本：2635 字原文最终选定 3 集，旧的 3500 除数会算出 1 集
+  assert.equal(defaultEpisodeCount(2635), 3)
+  assert.equal(defaultEpisodeCount(886), 1)
+  assert.equal(defaultEpisodeCount(3000), 3)
+  // 仍然限制在 1-30 集
+  assert.equal(defaultEpisodeCount(400), 1)
+  assert.equal(defaultEpisodeCount(0), 1)
+  assert.equal(defaultEpisodeCount(60_000), 30)
+})
+
+test('标题的「第N集：」前缀会被剥离，避免与前端 EP 0N 重复', () => {
+  // 全角/半角冒号、空格、中文数字、其它集次量词
+  assert.equal(stripEpisodeNumberPrefix('第1集：沉默的周一'), '沉默的周一')
+  assert.equal(stripEpisodeNumberPrefix('第 2 集: 三行的答案'), '三行的答案')
+  assert.equal(stripEpisodeNumberPrefix('第3集 打印机旁的人'), '打印机旁的人')
+  assert.equal(stripEpisodeNumberPrefix('第十二回、收束'), '收束')
+  assert.equal(stripEpisodeNumberPrefix('第4话·加班'), '加班')
+  // 仅前缀、无正文时保持原样，不能把标题剥成空串
+  assert.equal(stripEpisodeNumberPrefix('第1集'), '第1集')
+  assert.equal(stripEpisodeNumberPrefix('第1集：   '), '第1集：')
+  // 前缀后直接接正文（无分隔符）属于正常标题，不能误伤
+  assert.equal(stripEpisodeNumberPrefix('第三集的反转'), '第三集的反转')
+  assert.equal(stripEpisodeNumberPrefix('沉默的周一'), '沉默的周一')
+  assert.equal(stripEpisodeNumberPrefix(''), '')
+})
+
+test('分集切片产出的标题已不含集数前缀', () => {
+  const source = `第一段正文。第二段正文。第三段正文。第四段正文。`
+  const result = splitSourceIntoEpisodes(source, 2, [
+    { title: '第1集：起点' },
+    { title: '第2集：收束' },
+  ])
+  assert.deepEqual(result.map(item => item.title), ['起点', '收束'])
+  assert.equal(result.map(item => item.content).join(''), source)
 })
 
 test('drama routes expose safe link import, AI episode planning and controlled draft sync', () => {
