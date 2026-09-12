@@ -104,6 +104,8 @@
 
 | HB-20260912-05 | Issue #127：AI 配置接口出参脱敏与「密钥转发外泄」修复 | 已合入（PR #131，merge `eb06734`；balltoo 首轮 Request changes 后复核 APPROVED）。`withParsedFields` 统一脱敏，覆盖列表 / 详情 / 创建三条出口；掩码阈值 20 位、超长只保留前 6 位；`PUT` 空串 = 不修改、`null` = 清空、掩码回显 = 不修改。**复核 P0 修复**：新增 `resolveProbeTarget()`——带 `id` 时 `base_url` / `provider` / `service_type` 一律取库中值、忽略请求体，堵住首版"不知道密钥也能取用密钥"的外泄原语（`/test` 与 `/models` 共用）。前端不回填密钥、新增「清除已保存密钥」入口、编辑态「测试连接」与「拉取模型」改传 `id`；`redactPreview()` 防上游响应回显密钥。验证：typecheck 通过、全量 **301 pass / 0 fail / 0 skipped**、前端 161 pass + build、dev 栈实测出参全掩码（`sk-g2F********`）且请求体声明的 `attacker.example.com` 被忽略（实际调用库中 `https://token.sensenova.cn/v1/models`） | [查看 PR #131](https://github.com/Aibrother258/JisuVideo-ai/pull/131) |
 
+| HB-20260912-06 | Issue #121：项目圣经 MVP 批次 A（数据模型 + 读写接口 + 项目页板块） | 已合入（PR #133，merge `fc3c9bf`，2026-09-12T04:08:12Z；独立复核首轮 Request changes 4 条 → 逐条修复后复查 Approved → squash）。`project_bible_versions` 不可变版本行 + `dramas.current_bible_version_id` 指针（对齐 `source_versions` I7 范式）；`GET/PUT /dramas/:id/bible`、`GET /:id/bible/versions`（事务 + `SELECT … FOR UPDATE` + `expected_version_id` 乐观锁 → 409）；**拒绝整版全空**（`isProjectBibleEmpty` → 服务端 400 + 前端拦截 + 反向测试守卫）；`has_data` 改为**按内容判定**（空版本不再伪装「已确认」）；项目页新增「大纲与全局设定」tab（`ProjectBibleCard.vue`，空态可编辑、409 加载服务器最新版本）；分集页展示本集目标 / 承接 / 钩子 / 下集预告（加载失败保留旧值 + 内联重试，对齐 R1 规范）。验证：合入后 `master` typecheck 通过、全量 **314 / 314 pass / 0 fail / 0 skipped**、前端 169 / 169 + build、CI 两轮 pass。批次 B 剩余 = 第 6 项（受影响范围）+ 第 5 项历史 UI + 第 7 项（导入展示一致，含 `package-import` 写入）；#121 已回 `status:ready` 待认领 | [查看 PR #133](https://github.com/Aibrother258/JisuVideo-ai/pull/133) |
+
 ## 记录规范
 
 每篇日志至少包含：
