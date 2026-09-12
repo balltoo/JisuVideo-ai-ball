@@ -102,6 +102,8 @@
 
 | HB-20260912-04 | 「普通上班族如何学 AI」文本链路最小闭环试跑（探针式，无生产代码改动）——走通 ① 导入原文 → ⑧ 视频提示词 全链路，并对每个环节做数据库级验收；产出 20 项问题清单（P0 × 1 / P1 × 3 / P2 × 12 / P3 × 4），含 `GET /ai-configs` 明文返回 API Key、`script_rewriter` 改写相对时间并丢失事实、Step1 剧本面板无保存按钮、`@` 引用在资产图缺失时静默跳过、`naturalBoundaries` 不识别章节标题等 | 试跑完成（`dramas.id=86`）：拆集零改写（三集拼接去空白与快照严格相等 2454 == 2454）、`source_versions` 懒生成、草稿乐观锁、5 个 Agent 自治写入、台词时长硬规则、ID 白名单约束、道具三问过滤均经实测确认有效；20 项问题**全部登记未修**（试跑中仅就地人工处理 3 处：剧本 2 处事实错误、场景 1 处时变元素）；未进入付费环节（生图 / 生视频 / 拼接），EP02 / EP03 未验证，跨集一致性无证据 | [查看日志](./2026-09-12-office-ai-learning-trial-findings.md) |
 
+| HB-20260912-05 | Issue #127：AI 配置接口出参脱敏与「密钥转发外泄」修复 | 已合入（PR #131，merge `eb06734`；balltoo 首轮 Request changes 后复核 APPROVED）。`withParsedFields` 统一脱敏，覆盖列表 / 详情 / 创建三条出口；掩码阈值 20 位、超长只保留前 6 位；`PUT` 空串 = 不修改、`null` = 清空、掩码回显 = 不修改。**复核 P0 修复**：新增 `resolveProbeTarget()`——带 `id` 时 `base_url` / `provider` / `service_type` 一律取库中值、忽略请求体，堵住首版"不知道密钥也能取用密钥"的外泄原语（`/test` 与 `/models` 共用）。前端不回填密钥、新增「清除已保存密钥」入口、编辑态「测试连接」与「拉取模型」改传 `id`；`redactPreview()` 防上游响应回显密钥。验证：typecheck 通过、全量 **301 pass / 0 fail / 0 skipped**、前端 161 pass + build、dev 栈实测出参全掩码（`sk-g2F********`）且请求体声明的 `attacker.example.com` 被忽略（实际调用库中 `https://token.sensenova.cn/v1/models`） | [查看 PR #131](https://github.com/Aibrother258/JisuVideo-ai/pull/131) |
+
 ## 记录规范
 
 每篇日志至少包含：
