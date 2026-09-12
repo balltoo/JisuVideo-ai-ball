@@ -1,4 +1,4 @@
-# HB-20260912-08 Issue #128：试跑三项 P1 修复（相对时间保留 / 剧本保存入口 / 资产缺图提示）
+# HB-20260912-10 Issue #128：试跑三项 P1 修复（相对时间保留 / 剧本保存入口 / 资产缺图提示）
 
 > 实施账号：`balltoo` ｜ 实施线：`content-intelligence`（本任务推荐线）
 > 主仓库基线：`c1ae4d97`（PR #134 / #137 合入后的 master）
@@ -109,7 +109,7 @@ Issue 把"提交视频任务前做一次服务端校验"列为可选。本次不
 | `frontend/app/views/drama/episode.vue` | P1-2：`rawDirty` / `scriptDirty` / `stepDirty` / `saveScript()` / 2s debounce 自动保存 / `beforeunload`；P1-3：`shotRefCandidates()` + `shotRefAudit` / `shotRefWarnings`，`getShotReferenceImages` / `getShotReferenceIndexMap` 改为消费审计，两处警告块与样式 |
 | `frontend/tests/shot-reference-audit-behavior.test.mjs` | 新增文件，13 条：纳入顺序 / 缺图 / 去重 / 超限 / 自定义上限 / 手动上传边界 / 空输入容错 / 文案生成 |
 | `frontend/tests/episode-script-save-and-ref-warning-structure.test.mjs` | 新增文件，8 条：保存入口与事件接线 / 既有事件未破坏 / 脏标记 / 自动保存与改写守卫 / beforeunload+清理 / 审计单一来源 / 两处警告渲染与样式 token |
-| `docs/iteration-logs/**` | 本日志 + 台账登记（HB-20260912-08） |
+| `docs/iteration-logs/**` | 本日志 + 台账登记（HB-20260912-10） |
 
 无数据库结构变更，无接口契约变更。**有 Agent Skill 文本变更**（`script-rewriter`，见 §3.1）。
 
@@ -159,9 +159,13 @@ Issue 把"提交视频任务前做一次服务端校验"列为可选。本次不
 
 ## 7. 已知限制、风险与回滚
 
-- **HB 编号竞态（第三次出现，本次已按先合入者为准处理）**：`docs/iteration-logs/` 的编号与台账表是热点区。
-  本日志登记 `HB-20260912-08`（`-07` 归 #130、`-06` 归 #121、`-05` 归 #127，均保留不动）。若评审期间有别的 PR
-  先合入并占用 `-08`，按既有规则顺延重编号（改台账行 + 本日志标题/正文 + PR 描述）；
+- **HB 编号竞态（**三次**出现，本次**已发生**两次顺延**）：
+  本日志登记的最终编号是 **`HB-20260912-10`**（`docs/iteration-logs/` 编号与台账表是热点区）。
+  沿革如下：
+  - 最初登记 `HB-20260912-08`；
+  - 第一次合并 master `d2520751`（PR #139 项目圣经批次 B-1）时无编号冲突，编号未变；
+  - 第二次合并 master `56373ef` 时，**`08` 已被 PR #141（Issue #121 批次 B-1 复核合入）占用**（`baa1cab`），同时 **`09` 已被 PR #142（Issue #135 复核通过、合入 #140）占用**（`b5177c0d` / `56373ef`），按"先合入者为准"规则**连续顺延两次**到 **`-10`**；
+  - 已同步修改本日志标题、§4 表格与本段编号沿革；`docs/iteration-logs/README.md` 台账行本 PR 未改动（owner 已在复核反馈中确认会在合入后补行指向本 PR）。
 - **热点文件**：`episode.vue` 与 `EpisodeScriptPanel.vue` 属巨型页面/公共组件（协作计划 §7）。
   认领时仓库无开放 PR、#121 批次 A 只动 `detail.vue` 与后端，故无并发占用；若 #129（Skill 规则批次）或
   #121 批次 B 随后开工，需按热点锁串行或 rebase 协调；
@@ -169,9 +173,36 @@ Issue 把"提交视频任务前做一次服务端校验"列为可选。本次不
   且该监听在用户"确实想离开"时会成为一次额外点击。这是有意的取舍（防静默丢失优先）；
 - **自动保存的写放大**：2s debounce 意味着长时间连续编辑会多次 `PUT`。已用 debounce + 改写运行中禁用来收敛；
   若后续出现写压力，可上调间隔或改为"内容签名未变则跳过"；
+- **自动保存路径缺少失败反馈（owner 复核反馈建议 1，已采纳"登记"分支）**：
+  本 PR 把"已保存"做成显式 UI 承诺（工具栏 `save-state` 与 `beforeunload` 都依赖 `scriptDirty`），但 `saveScr()`（既有）
+  调用 `episodeAPI.update(...)` 不 `await`、不 `catch`，紧接着就本地乐观赋值 `episode.value.script_content = localScript.value`。
+  若 PUT 失败，会出现"`useApi.req` 抛 unhandled rejection + UI 仍显示「已保存」+ `beforeunload` 不再拦"的窗口，
+  用户以为已落库。本 PR **不补代码**的理由：① 本 PR 主题明确"不改变保存策略"；
+  ② 同样的同构风险存在于 Step0 既有 `saveRaw()`（自项目最早版本即如此），本 PR 仅把它显化，不应越界单向修复；
+  ③ owner 给出"补 catch / 或登记"二选一，本节即为登记路径。
+  **建议补法（留作独立 Issue）**：给 `saveScr/saveRaw` 加 `try/catch → toast.warning('保存失败，请重试')` + 失败时**保留 dirty**，
+  与现有 Step0 同步处理，单独 PR 覆盖"既有保存路径的失败可见性"主题；
 - **`@图片N` 索引口径变更**：由"仅资产、原始 URL 去重"改为"统一走审计、归一化 URL 去重"。正常场景（同一素材只有一个 URL）
   结果不变；仅当同图存在 `static/x` 与 `/static/x` 两种写法时，行为从"算两张"变为"算一张"——这是修正而非回归，
   且与实际上传列表一致；
+- **`getShotReferenceImages(sb)` 在非选中分镜上会串入手动上传图（owner 复核反馈建议 2，既有行为）**：
+  `shotRefCandidates()` 尾部固定追加**当前选中分镜**的 `videoRefImageUrls.value`，
+  故 `episode.vue:videoTaskRows`（遍历全部分镜）里，非选中分镜的 `referenceCount` 会包含选中分镜的手动图。
+  与改造前等价（旧实现同样 append），本 PR 不动；建议后续把候选签名改为 `shotRefCandidates(sb, manualUrls)` 显式传入，
+  让 `sb` 与手动图严格对应（避免后续误判为 bug）；
+- **`dropped` 文案把「图片重复」与「超限」合并成一句（owner 复核反馈建议 3）**：
+  当前「参考图上限 9 张（或图片重复）：…未被纳入本次参考」在两种原因下都出现；
+  对只发生重复、并未触顶的用户，"上限 9 张"的措辞略易误解。本 PR 不动（owner 标为非阻塞）；
+  后续可按实际原因拆成两句，或改写为「未被纳入（重复或超出上限）」；
+- **P1-2 的结构测试对源码格式敏感（owner 复核反馈建议 4）**：
+  `episode-script-save-and-ref-warning-structure.test.mjs` 用正则匹配 `episode.vue` 源码（含跨行 `\s*\n\s*`），
+  重排格式即会红。与项目既有结构测试风格一致，本 PR 接受此成本。
+  owner 建议把 debounce / dirty 语义抽成 `utils/*.mjs` 纯函数——P1-3 的 `shot-reference-audit.mjs` 即此路径，做得对；
+  P1-2 的纯函数抽取建议作为独立任务（Step0 的 `saveRaw` 同构逻辑也应一并纳入），不在本 PR 范围；
+- **P1-1 未做真实模型端到端验证（owner 复核反馈建议 5）**：
+  本 PR 接受"模型采样不可复现，单次跑通不构成证明"。建议作为独立任务：
+  对固定原文跑 N 次统计「相对时间词 / 事实数字保留率」，做成可重复脚本化验证（即 Issue 列为可选的事实校验工具）。
+  这与 §8.1 的"改写后事实比对"是同一主题的两面，前端 UI 提示 vs 脚本化统计；
 - **本地环境差异**：本机 `F:` 盘 git 无法稳定写嵌套 ref，分支名沿用扁平命名（`fix-issue-128-p1-trial-fixes`），
   偏离 `docs/collaboration-task-claim-plan.md` §6 的 `<type>/issue-N-slug` 约定，已在认领留言与本 PR 说明；
 - **回滚**：全部改动可通过对本 PR 的单次 revert 回滚；无数据迁移、无 schema 变更。
