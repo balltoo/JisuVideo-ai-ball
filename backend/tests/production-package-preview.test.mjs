@@ -28,7 +28,7 @@ import productionPackages, { createProductionPackagesRouter } from '../src/route
 import { createPreviewSessionAuth, signPreviewIdentity, PREVIEW_AUTH_AUDIENCE, PREVIEW_AUTH_MAX_AGE_MS } from '../src/middleware/preview-auth.ts'
 import { createLocalPreviewSessionAuth } from '../src/middleware/preview-local-session.ts'
 import { previewRequestBodyLimit } from '../src/middleware/preview-request-body.ts'
-import { consumePreviewNonce, previewNonceStorePath } from '../src/middleware/preview-nonce-store.ts'
+import { consumePreviewNonce, previewNonceStorePath, isLockContentionError } from '../src/middleware/preview-nonce-store.ts'
 import { requestLogger } from '../src/middleware/logger.ts'
 
 const fixtureRoot = path.join(helpers.PACKAGES_DIR, 'fixture-rain-lantern')
@@ -634,6 +634,75 @@ test('并发创建不同 nonce 不得突破持久化总配额', async () => {
     else process.env.PREVIEW_AUTH_NONCE_STORE_PATH = previousPath
     if (previousMaxEntries === undefined) delete process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
     else process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = previousMaxEntries
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('文件锁把 Windows 的瞬时竞争错误码视为可重试（#135）', () => {
+  // POSIX 语义：文件已存在
+  assert.equal(isLockContentionError('EEXIST'), true)
+  // Windows 语义：delete pending（上一持有者的 rm 已发起、句柄未完全释放）返回 ACCESS_DENIED，
+  // 句柄冲突返回 EBUSY。修复前只认 EEXIST，导致并发抢锁把瞬态竞争当致命错误抛出（预览接口 500）。
+  assert.equal(isLockContentionError('EPERM'), true)
+  assert.equal(isLockContentionError('EACCES'), true)
+  assert.equal(isLockContentionError('EBUSY'), true)
+  // 非竞争类错误必须继续抛出，不能被吞成「无限重试」
+  for (const code of ['ENOENT', 'ENOSPC', 'EIO', 'EISDIR', undefined, null, 42]) {
+    assert.equal(isLockContentionError(code), false, `${String(code)} 不应被当作锁竞争`)
+  }
+})
+
+test('锁被竞争者释放后重试成功（覆盖退避等待路径）', async () => {
+  const previousPath = process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+  const previousMaxEntries = process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-nonce-lockwait-'))
+  process.env.PREVIEW_AUTH_NONCE_STORE_PATH = root
+  process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = '10'
+  const key = 'tenant-lockwait\nuser-lockwait\nnonce-lockwait'
+  // 占位锁：owner 指向存活的本进程，确保不会被 stale 抢占逻辑回收
+  const lockPath = path.join(root, '.quota.lock')
+  const owner = JSON.stringify({ host: os.hostname(), pid: process.pid, id: crypto.randomBytes(16).toString('hex') })
+  try {
+    await fs.promises.writeFile(lockPath, owner, { mode: 0o600 })
+    const pending = consumePreviewNonce(key, Date.now() + 60_000)
+    await new Promise(resolve => setTimeout(resolve, 100))
+    await fs.promises.rm(lockPath, { force: true })
+    assert.equal(await pending, true, '竞争者释放锁之后应完成消费')
+  } finally {
+    if (previousPath === undefined) delete process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+    else process.env.PREVIEW_AUTH_NONCE_STORE_PATH = previousPath
+    if (previousMaxEntries === undefined) delete process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+    else process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = previousMaxEntries
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('等待锁超时：fail-closed 抛 PREVIEW_NONCE_STORE_UNAVAILABLE（上限可注入）', async () => {
+  const previousPath = process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+  const previousMaxEntries = process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+  const previousTimeout = process.env.PREVIEW_AUTH_NONCE_LOCK_TIMEOUT_MS
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jisu-preview-nonce-timeout-'))
+  process.env.PREVIEW_AUTH_NONCE_STORE_PATH = root
+  process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = '10'
+  // 注入极小上限，使「被长期占用 → 超时」这条 fail-closed 路径可测
+  process.env.PREVIEW_AUTH_NONCE_LOCK_TIMEOUT_MS = '40'
+  // 占位锁：owner 指向存活的本进程，stale 抢占不会回收，因此只能等到超时
+  const lockPath = path.join(root, '.quota.lock')
+  const owner = JSON.stringify({ host: os.hostname(), pid: process.pid, id: crypto.randomBytes(16).toString('hex') })
+  try {
+    await fs.promises.writeFile(lockPath, owner, { mode: 0o600 })
+    await assert.rejects(
+      () => consumePreviewNonce('tenant-timeout\nuser-timeout\nnonce-timeout', Date.now() + 60_000),
+      (error) => error?.code === 'PREVIEW_NONCE_STORE_UNAVAILABLE',
+      '锁被长期占用时必须 fail-closed 抛 PREVIEW_NONCE_STORE_UNAVAILABLE（preview-auth 映射为 503）',
+    )
+  } finally {
+    if (previousPath === undefined) delete process.env.PREVIEW_AUTH_NONCE_STORE_PATH
+    else process.env.PREVIEW_AUTH_NONCE_STORE_PATH = previousPath
+    if (previousMaxEntries === undefined) delete process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES
+    else process.env.PREVIEW_AUTH_NONCE_MAX_ENTRIES = previousMaxEntries
+    if (previousTimeout === undefined) delete process.env.PREVIEW_AUTH_NONCE_LOCK_TIMEOUT_MS
+    else process.env.PREVIEW_AUTH_NONCE_LOCK_TIMEOUT_MS = previousTimeout
     await fs.promises.rm(root, { recursive: true, force: true })
   }
 })
