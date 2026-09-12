@@ -208,6 +208,21 @@ export async function getProjectBible(dramaId: number, connectionPool: Pool = po
   return rows[0] ? serializeProjectBible(rows[0]) : emptyProjectBible()
 }
 
+/** 读取指定历史版本详情（校验归属）；供历史查看与回退前预览。 */
+export async function getProjectBibleVersion(
+  dramaId: number,
+  versionId: number,
+  connectionPool: Pool = pool,
+): Promise<ProjectBibleView> {
+  await loadDrama(connectionPool, dramaId)
+  const [rows] = await connectionPool.query<any[]>(
+    'SELECT * FROM project_bible_versions WHERE id = ? AND drama_id = ? LIMIT 1',
+    [versionId, dramaId],
+  )
+  if (!rows[0]) throw new ProjectBibleNotFound('大纲版本不存在或不属于当前项目')
+  return serializeProjectBible(rows[0])
+}
+
 /** 版本历史（倒序，最多 50 条）；供批次 B 历史查看与回退复用。 */
 export async function listProjectBibleVersions(dramaId: number, connectionPool: Pool = pool) {
   const drama = await loadDrama(connectionPool, dramaId)
@@ -285,6 +300,73 @@ export async function saveProjectBible(options: {
       )
       await connection.commit()
       return serializeProjectBible(rows[0])
+    } catch (error) {
+      await connection.rollback()
+      throw error
+    }
+  } finally {
+    connection.release()
+  }
+}
+
+/**
+ * 回退到指定历史版本：只切换 dramas.current_bible_version_id 指针，
+ * 不新建、不修改、不删除任何版本行（历史始终完整可查）。
+ * CAS = expected_version_id（当前指针），不一致 → ProjectBibleConflict（路由转 409）。
+ * 语义顺序：404（项目不存在）→ 400（target/expected 非法或不属于本项目）→ 409（版本冲突）。
+ */
+export async function switchProjectBibleVersion(options: {
+  dramaId: number
+  targetVersionId: number
+  expectedVersionId: number | null
+  connectionPool?: Pool
+}): Promise<{ current: ProjectBibleView; changed: boolean }> {
+  const connectionPool = options.connectionPool || pool
+  const targetVersionId = Number(options.targetVersionId)
+  if (!Number.isInteger(targetVersionId) || targetVersionId <= 0) {
+    throw new Error('target_version_id 必须是合法正整数')
+  }
+  const expected = options.expectedVersionId == null ? null : Number(options.expectedVersionId)
+  if (expected !== null && (!Number.isInteger(expected) || expected <= 0)) {
+    throw new Error('expected_version_id 必须是正整数或 null')
+  }
+
+  const connection = await connectionPool.getConnection()
+  try {
+    await connection.beginTransaction()
+    try {
+      const drama = await loadDrama(connection as unknown as Pool, options.dramaId, true)
+      const currentVersionId = currentBibleVersionId(drama)
+      const [targetRows] = await connection.query<any[]>(
+        'SELECT * FROM project_bible_versions WHERE id = ? AND drama_id = ? LIMIT 1',
+        [targetVersionId, options.dramaId],
+      )
+      if (!targetRows[0]) throw new Error('目标大纲版本不存在或不属于当前项目')
+      // 归属优先：expected 非空但不属于本项目 → 400（对齐 source/switch 语义）
+      if (expected !== null) {
+        const [expectedRows] = await connection.query<any[]>(
+          'SELECT id FROM project_bible_versions WHERE id = ? AND drama_id = ? LIMIT 1',
+          [expected, options.dramaId],
+        )
+        if (!expectedRows[0]) throw new Error('expected_version_id 不属于当前项目')
+      }
+      if (currentVersionId !== expected) {
+        throw new ProjectBibleConflict('VERSION_CONFLICT：大纲已有更新，请重新加载后再回退')
+      }
+
+      const changed = currentVersionId !== targetVersionId
+      if (changed) {
+        await connection.execute(
+          'UPDATE dramas SET current_bible_version_id = ?, updated_at = ? WHERE id = ?',
+          [targetVersionId, new Date().toISOString(), options.dramaId],
+        )
+      }
+      const [rows] = await connection.query<any[]>(
+        'SELECT * FROM project_bible_versions WHERE id = ? LIMIT 1',
+        [targetVersionId],
+      )
+      await connection.commit()
+      return { current: serializeProjectBible(rows[0]), changed }
     } catch (error) {
       await connection.rollback()
       throw error

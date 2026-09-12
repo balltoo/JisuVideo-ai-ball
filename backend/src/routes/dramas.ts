@@ -8,7 +8,7 @@ import { getActiveConfigId } from '../services/ai.js'
 import { importNovelSource } from '../services/source-import.js'
 import { defaultEpisodeCount, splitSourceIntoEpisodes } from '../services/episode-planning.js'
 import { contentFingerprint, normalizeReviewablePlan, parseJsonArray, serializePlanDraft, sourceHash } from '../services/episode-plan-draft.js'
-import { getProjectBible, listProjectBibleVersions, saveProjectBible, ProjectBibleConflict, ProjectBibleNotFound } from '../services/project-bible.js'
+import { getProjectBible, getProjectBibleVersion, listProjectBibleVersions, saveProjectBible, switchProjectBibleVersion, ProjectBibleConflict, ProjectBibleNotFound } from '../services/project-bible.js'
 import { ensureSourceVersion, getCurrentSourceText, SourceContentConflict, SourceVersionPointerError } from '../services/source-versions.js'
 import {
   estimateSourceCleanup,
@@ -692,6 +692,39 @@ app.get('/:id/bible/versions', async (c) => {
   } catch (err: any) {
     if (err instanceof ProjectBibleNotFound) return notFound(c, err.message)
     return badRequest(c, err?.message || '读取项目圣经版本历史失败')
+  }
+})
+
+// GET /dramas/:id/bible/versions/:versionId - 查看指定历史版本内容（回退前预览）
+app.get('/:id/bible/versions/:versionId', async (c) => {
+  const id = Number(c.req.param('id'))
+  const versionId = Number(c.req.param('versionId'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  if (!Number.isInteger(versionId) || versionId <= 0) return badRequest(c, 'version_id 必须是合法正整数')
+  try {
+    return success(c, await getProjectBibleVersion(id, versionId))
+  } catch (err: any) {
+    if (err instanceof ProjectBibleNotFound) return notFound(c, err.message)
+    return badRequest(c, err?.message || '读取大纲版本失败')
+  }
+})
+
+// POST /dramas/:id/bible/switch - 回退到历史版本；只切指针，不新建/不删除版本行；CAS 冲突返回 409
+app.post('/:id/bible/switch', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  let body: any = {}
+  try { body = await c.req.json() } catch { return badRequest(c, '请求体必须包含 target_version_id 与 expected_version_id') }
+  try {
+    return success(c, await switchProjectBibleVersion({
+      dramaId: id,
+      targetVersionId: body.target_version_id,
+      expectedVersionId: body.expected_version_id,
+    }))
+  } catch (err: any) {
+    if (err instanceof ProjectBibleConflict) return conflict(c, err.message)
+    if (err instanceof ProjectBibleNotFound) return notFound(c, err.message)
+    return badRequest(c, err?.message || '回退大纲版本失败')
   }
 })
 

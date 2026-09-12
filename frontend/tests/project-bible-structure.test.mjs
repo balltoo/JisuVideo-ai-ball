@@ -18,6 +18,9 @@ test('useApi 暴露 bibleAPI，路径与后端端点对齐', () => {
   assert.match(api, /api\.put\(`\/dramas\/\$\{id\}\/bible`, data\)/)
   assert.match(api, /api\.get\(`\/dramas\/\$\{id\}\/bible\/versions`\)/)
   assert.match(api, /expected_version_id: number \| null/)
+  // 批次 B-1：历史详情与回退
+  assert.match(api, /api\.get\(`\/dramas\/\$\{id\}\/bible\/versions\/\$\{versionId\}`\)/)
+  assert.match(api, /api\.post\(`\/dramas\/\$\{id\}\/bible\/switch`, data\)/)
 })
 
 test('detail.vue 新增「大纲与全局设定」Tab 与 ProjectBibleCard 板块', () => {
@@ -80,8 +83,11 @@ test('episode.vue 大纲加载失败：保留旧值并内联提示（对齐 R1�
 
 test('UI token 守卫：ProjectBibleCard 不引入硬编码色值', () => {
   const card = read('app/components/ProjectBibleCard.vue')
-  assert.doesNotMatch(card, /#[0-9a-fA-F]{3,8}\b/, '不得硬编码十六进制色值')
-  assert.doesNotMatch(card, /rgba?\(/, '不得硬编码 rgb/rgba 色值')
+  // 只检查 <style> 块：模板/注释中的 Issue 编号（如 #121）不是色值
+  const styleBlock = card.slice(card.indexOf('<style'), card.lastIndexOf('</style>'))
+  assert.ok(styleBlock.length > 0, '未找到 style 块')
+  assert.doesNotMatch(styleBlock, /#[0-9a-fA-F]{3,8}\b/, '不得硬编码十六进制色值')
+  assert.doesNotMatch(styleBlock, /rgba?\(/, '不得硬编码 rgb/rgba 色值')
 })
 
 test('ProjectBibleCard：拒绝整版全空保存（与服务端一致，空态不被永久覆盖）', () => {
@@ -89,4 +95,21 @@ test('ProjectBibleCard：拒绝整版全空保存（与服务端一致，空态�
   assert.match(card, /function hasAnyBibleContent/)
   assert.match(card, /请至少填写一项大纲内容后再保存/)
   assert.match(card, /if \(!hasAnyBibleContent\(payload\)\)/)
+})
+
+test('ProjectBibleCard 批次 B-1：版本历史查看与回退（CAS + 409 只刷新不重提）', () => {
+  const card = read('app/components/ProjectBibleCard.vue')
+  assert.match(card, /const historyOpen = ref\(false\)/)
+  assert.match(card, /bibleAPI\.versions\(props\.dramaId\)/)
+  assert.match(card, /bibleAPI\.versionDetail\(props\.dramaId, versionId\)/)
+  assert.match(card, /bibleAPI\.switchVersion\(props\.dramaId, \{/)
+  assert.match(card, /target_version_id: versionId/)
+  assert.match(card, /expected_version_id: view\.value\?\.version_id \?\? null/)
+  assert.match(card, /回退只切换当前生效版本，不删除任何历史版本/)
+  assert.match(card, /class="project-bible-version-list"/)
+  assert.match(card, /回退到此版本/)
+  // 409：只提示冲突 + 刷新列表，不自动重提
+  assert.match(card, /error\?\.status === 409/)
+  assert.match(card, /versionConflict\.value = error\.message/)
+  assert.match(card, /刷新版本历史/)
 })

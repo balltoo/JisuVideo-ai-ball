@@ -87,6 +87,9 @@ export const bibleAPI = {
   // PUT /dramas/:id/bible：保存并确认新版本；expected_version_id 为乐观锁（首次传 null，冲突返回 409）
   save: (id: number, data: { bible: any; expected_version_id: number | null; source?: string }) => api.put(`/dramas/${id}/bible`, data),
   versions: (id: number) => api.get(`/dramas/${id}/bible/versions`),
+  // 历史查看与回退（#121 批次 B-1）：回退只切当前指针，不新建/不删除版本行
+  versionDetail: (id: number, versionId: number) => api.get(`/dramas/${id}/bible/versions/${versionId}`),
+  switchVersion: (id: number, data: { target_version_id: number; expected_version_id: number | null }) => api.post(`/dramas/${id}/bible/switch`, data),
 }
 
 export const episodeAPI = {

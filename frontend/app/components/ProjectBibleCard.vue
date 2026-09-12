@@ -9,6 +9,7 @@
       <div class="project-bible-head-actions">
         <span v-if="hasBible" class="tag">已确认 · V{{ view.version_id }}</span>
         <span v-else class="tag">尚未创建</span>
+        <button type="button" class="btn btn-sm" @click="toggleHistory">{{ historyOpen ? '收起版本历史' : '版本历史' }}</button>
         <button v-if="!editing" type="button" class="btn" :disabled="loading" @click="startEdit">
           {{ hasBible ? '编辑并确认新版本' : '开始编辑' }}
         </button>
@@ -148,6 +149,55 @@
         <button type="submit" class="btn btn-primary" :disabled="saving">{{ saving ? '保存中…' : '保存并确认' }}</button>
       </div>
     </form>
+
+    <div v-if="historyOpen" class="project-bible-history">
+      <div class="project-bible-block-head">
+        <h3>版本历史</h3>
+        <span class="project-bible-history-note">回退只切换当前生效版本，不删除任何历史版本</span>
+      </div>
+      <div v-if="historyLoading" class="project-bible-state">加载中…</div>
+      <div v-else-if="historyError" class="project-bible-state is-error">
+        <span>{{ historyError }}</span>
+        <button type="button" class="btn btn-sm" @click="loadVersions">重试</button>
+      </div>
+      <div v-else-if="!versions.length" class="project-bible-state">尚无版本记录。</div>
+      <ul v-else class="project-bible-version-list">
+        <li v-for="item in versions" :key="item.version_id" :class="['project-bible-version-row', { 'is-current': item.is_current }]">
+          <div class="project-bible-version-main">
+            <b>V{{ item.version_id }}</b>
+            <span class="tag">{{ item.source === 'package-import' ? '生产包导入' : '人工确认' }}</span>
+            <span v-if="item.is_current" class="tag">当前生效</span>
+            <span class="project-bible-version-time">{{ item.created_at }}</span>
+          </div>
+          <div class="project-bible-version-actions">
+            <button type="button" class="btn btn-sm" @click="previewVersion(item.version_id)">
+              {{ previewVersionId === item.version_id ? '收起' : '查看' }}
+            </button>
+            <button type="button" class="btn btn-sm" :disabled="item.is_current || versionPending" @click="revertToVersion(item.version_id)">
+              {{ versionPending ? '回退中…' : '回退到此版本' }}
+            </button>
+          </div>
+          <div v-if="previewVersionId === item.version_id" class="project-bible-version-preview">
+            <div v-if="previewLoading">加载中…</div>
+            <template v-else-if="previewDetail?.bible">
+              <div v-if="previewDetail.bible.logline" class="project-bible-logline">{{ previewDetail.bible.logline }}</div>
+              <div v-if="previewDetail.bible.main_conflict" class="project-bible-version-line"><b>主线冲突</b>{{ previewDetail.bible.main_conflict }}</div>
+              <div v-if="previewDetail.bible.stages.length" class="project-bible-version-line"><b>阶段结构</b>{{ previewDetail.bible.stages.map(stage => stage.name || stage.goal).join('、') }}</div>
+              <ul v-if="previewDetail.bible.episodes.length" class="project-bible-list">
+                <li v-for="episode in previewDetail.bible.episodes" :key="`preview-${episode.episode_number}`">
+                  第 {{ episode.episode_number }} 集：{{ episode.objective || episode.hook || '—' }}
+                </li>
+              </ul>
+            </template>
+            <div v-else>该版本没有可展示的内容。</div>
+          </div>
+        </li>
+      </ul>
+      <div v-if="versionConflict" class="project-bible-state is-error">
+        <span>{{ versionConflict }}</span>
+        <button type="button" class="btn btn-sm" @click="loadVersions">刷新版本历史</button>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -166,6 +216,17 @@ const view = ref(null)
 const editing = ref(false)
 const saving = ref(false)
 const conflict = ref('')
+
+// 版本历史（Issue 121 批次 B-1）：只读列表 + 版本预览 + 回退指针（CAS）
+const historyOpen = ref(false)
+const historyLoading = ref(false)
+const historyError = ref('')
+const versions = ref([])
+const previewVersionId = ref(null)
+const previewDetail = ref(null)
+const previewLoading = ref(false)
+const versionPending = ref(false)
+const versionConflict = ref('')
 
 const EDIT_FIELDS = [
   { key: 'logline', label: '一句话卖点', type: 'input', placeholder: '一句话说明这个故事' },
@@ -344,6 +405,7 @@ async function save() {
       expected_version_id: view.value?.version_id ?? null,
     })
     editing.value = false
+    if (historyOpen.value) await loadVersions()
     toast.success('大纲已保存并生成新版本')
   } catch (error) {
     if (error?.status === 409) {
@@ -359,6 +421,74 @@ async function save() {
 async function reloadAfterConflict() {
   await load()
   startEdit()
+}
+
+async function loadVersions() {
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const result = await bibleAPI.versions(props.dramaId)
+    versions.value = Array.isArray(result?.versions) ? result.versions : []
+  } catch (error) {
+    historyError.value = error?.message || '加载版本历史失败'
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+function toggleHistory() {
+  historyOpen.value = !historyOpen.value
+  if (historyOpen.value) loadVersions()
+  else {
+    previewVersionId.value = null
+    previewDetail.value = null
+    versionConflict.value = ''
+  }
+}
+
+async function previewVersion(versionId) {
+  if (previewVersionId.value === versionId) {
+    previewVersionId.value = null
+    previewDetail.value = null
+    return
+  }
+  previewVersionId.value = versionId
+  previewDetail.value = null
+  previewLoading.value = true
+  try {
+    previewDetail.value = await bibleAPI.versionDetail(props.dramaId, versionId)
+  } catch (error) {
+    toast.error(error?.message || '加载版本内容失败')
+    previewVersionId.value = null
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+async function revertToVersion(versionId) {
+  versionPending.value = true
+  versionConflict.value = ''
+  try {
+    const result = await bibleAPI.switchVersion(props.dramaId, {
+      target_version_id: versionId,
+      expected_version_id: view.value?.version_id ?? null,
+    })
+    if (result?.current) view.value = result.current
+    previewVersionId.value = null
+    previewDetail.value = null
+    await loadVersions()
+    toast.success(`已回退到 V${versionId}`)
+  } catch (error) {
+    if (error?.status === 409) {
+      // 冲突只刷新，不自动重提（对齐 SourceCleanupCard 的 409 范式）
+      versionConflict.value = error.message || '大纲已被其他窗口更新，请刷新版本历史后重试'
+      await loadVersions()
+    } else {
+      toast.error(error?.message || '回退大纲版本失败')
+    }
+  } finally {
+    versionPending.value = false
+  }
 }
 
 onMounted(load)
@@ -493,6 +623,57 @@ defineExpose({ load })
 .project-bible-form-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
+}
+.project-bible-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--border, transparent);
+  padding-top: 12px;
+}
+.project-bible-history-note {
+  color: var(--text-2);
+  font-size: 12px;
+}
+.project-bible-version-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.project-bible-version-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+}
+.project-bible-version-row.is-current {
+  font-weight: 600;
+}
+.project-bible-version-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.project-bible-version-time {
+  color: var(--text-2);
+  font-size: 12px;
+}
+.project-bible-version-actions {
+  display: flex;
+  gap: 8px;
+}
+.project-bible-version-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.project-bible-version-line {
+  display: flex;
   gap: 8px;
 }
 </style>
