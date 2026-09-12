@@ -7,13 +7,15 @@
  * 运行：`npm run test:ui`（CI 强制）。
  */
 import { beforeEach, expect, test, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type DOMWrapper } from '@vue/test-utils'
 import ProjectBibleCard from '../../app/components/ProjectBibleCard.vue'
 
 const m = vi.hoisted(() => ({
   get: vi.fn(),
   save: vi.fn(),
   versions: vi.fn(),
+  versionDetail: vi.fn(),
+  switchVersion: vi.fn(),
   toast: { success: vi.fn(), error: vi.fn() },
 }))
 
@@ -53,8 +55,10 @@ function filledView(versionId: number, logline: string) {
   }
 }
 
-function buttonIn(wrapper: ReturnType<typeof mount<typeof ProjectBibleCard>>, text: string) {
-  const btn = wrapper.findAll('button').find(b => b.text().includes(text))
+type ButtonScope = { findAll: (selector: string) => DOMWrapper<Element>[] }
+
+function buttonIn(scope: ButtonScope, text: string) {
+  const btn = scope.findAll('button').find(b => b.text().includes(text))
   if (!btn) throw new Error(`missing button "${text}"`)
   return btn
 }
@@ -163,4 +167,58 @@ test('整版全空：客户端拦截，不发出保存请求（避免空版本�
   expect(m.save).not.toHaveBeenCalled()
   expect(m.toast.error).toHaveBeenCalled()
   expect(wrapper.find('form.project-bible-form').exists()).toBe(true)
+})
+
+function versionRow(versionId: string) {
+  return { version_id: Number(versionId), source: 'manual', content_hash: `h${versionId}`, created_at: '2026-09-12T04:00:00.000Z', updated_at: '2026-09-12T04:00:00.000Z', is_current: false }
+}
+
+test('版本历史：列表渲染、查看版本内容、回退携带 CAS 参数', async () => {
+  const wrapper = await mountCard(filledView(4, '当前标题'))
+  m.versions.mockResolvedValueOnce({
+    current_version_id: 4,
+    versions: [versionRow('4'), versionRow('3')].map(row => ({ ...row, is_current: row.version_id === 4 })),
+  })
+  m.versionDetail.mockResolvedValueOnce(filledView(3, '历史标题'))
+  m.switchVersion.mockResolvedValueOnce({ current: filledView(3, '历史标题'), changed: true })
+  m.versions.mockResolvedValueOnce({
+    current_version_id: 3,
+    versions: [versionRow('3'), versionRow('4')].map(row => ({ ...row, is_current: row.version_id === 3 })),
+  })
+
+  await buttonIn(wrapper, '版本历史').trigger('click')
+  await flushPromises()
+  expect(m.versions).toHaveBeenCalledWith(7)
+  expect(wrapper.text()).toContain('V3')
+  expect(wrapper.text()).toContain('当前生效')
+
+  const v3Row = wrapper.findAll('.project-bible-version-row').find(row => row.text().includes('V3'))
+  if (!v3Row) throw new Error('missing V3 row')
+  await buttonIn(v3Row, '查看').trigger('click')
+  await flushPromises()
+  expect(m.versionDetail).toHaveBeenCalledWith(7, 3)
+  expect(v3Row.text()).toContain('历史标题')
+
+  await buttonIn(v3Row, '回退到此版本').trigger('click')
+  await flushPromises()
+  expect(m.switchVersion).toHaveBeenCalledWith(7, { target_version_id: 3, expected_version_id: 4 })
+  expect(m.toast.success).toHaveBeenCalled()
+})
+
+test('版本历史回退 409：提示冲突并刷新列表，不自动重试', async () => {
+  const wrapper = await mountCard(filledView(4, '当前标题'))
+  m.versions.mockResolvedValueOnce({ current_version_id: 4, versions: [versionRow('3')] })
+  m.switchVersion.mockRejectedValueOnce(conflictError(409, 'VERSION_CONFLICT：大纲已有更新'))
+  m.versions.mockResolvedValueOnce({ current_version_id: 5, versions: [] })
+
+  await buttonIn(wrapper, '版本历史').trigger('click')
+  await flushPromises()
+  const row = wrapper.findAll('.project-bible-version-row').find(r => r.text().includes('V3'))
+  if (!row) throw new Error('missing V3 row')
+  await buttonIn(row, '回退到此版本').trigger('click')
+  await flushPromises()
+
+  expect(m.switchVersion).toHaveBeenCalledTimes(1)
+  expect(wrapper.text()).toContain('VERSION_CONFLICT：大纲已有更新')
+  expect(m.versions).toHaveBeenCalledTimes(2)
 })

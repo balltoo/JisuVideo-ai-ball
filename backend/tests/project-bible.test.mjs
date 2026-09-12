@@ -30,7 +30,9 @@ const {
   serializeProjectBible,
   emptyProjectBible,
   getProjectBible,
+  getProjectBibleVersion,
   saveProjectBible,
+  switchProjectBibleVersion,
   listProjectBibleVersions,
   ProjectBibleConflict,
   ProjectBibleNotFound,
@@ -160,6 +162,27 @@ test('路由：GET/PUT /:id/bible 与 GET /:id/bible/versions，冲突 409、不
   assert.match(src, /err instanceof ProjectBibleConflict\) return conflict/)
   assert.match(src, /err instanceof ProjectBibleNotFound\) return notFound/)
   assert.match(src, /expected_version_id/)
+})
+
+test('批次 B-1 路由：历史版本详情与回退（switch）端点', () => {
+  const src = read('src/routes/dramas.ts')
+  assert.match(src, /app\.get\('\/:id\/bible\/versions\/:versionId'/)
+  assert.match(src, /app\.post\('\/:id\/bible\/switch'/)
+  assert.match(src, /switchProjectBibleVersion\(\{/)
+  assert.match(src, /getProjectBibleVersion\(id, versionId\)/)
+})
+
+test('批次 B-1 服务：回退只切指针，不写 project_bible_versions', () => {
+  const src = read('src/services/project-bible.ts')
+  assert.match(src, /export async function switchProjectBibleVersion/)
+  assert.match(src, /export async function getProjectBibleVersion/)
+  // 回退段不得出现 INSERT / DELETE project_bible_versions（仅 UPDATE 指针）
+  const switchSection = src.slice(src.indexOf('export async function switchProjectBibleVersion'))
+  assert.doesNotMatch(switchSection, /INSERT INTO project_bible_versions/i)
+  assert.doesNotMatch(switchSection, /DELETE FROM project_bible_versions/i)
+  assert.match(switchSection, /UPDATE dramas SET current_bible_version_id = \?/)
+  // 锁行在共享 loadDrama 内（FOR UPDATE），switch 通过 lock=true 调用
+  assert.match(switchSection, /loadDrama\(connection as unknown as Pool, options\.dramaId, true\)/)
 })
 
 test('版本行不可变：服务不存在 project_bible_versions 的 UPDATE / DELETE，只 INSERT + 切指针', () => {
@@ -303,6 +326,50 @@ test('真实 MySQL：项目圣经版本行不可变、指针切换、历史倒�
     await assert.rejects(() => getProjectBible(999_999_999, pool), (err) => err instanceof ProjectBibleNotFound)
     await assert.rejects(
       () => saveProjectBible({ dramaId: 999_999_999, bible: {}, expectedVersionId: null, connectionPool: pool }),
+      (err) => err instanceof ProjectBibleNotFound,
+    )
+
+    // 4.10 回退（批次 B-1）：只切指针，不新建/不删除版本行
+    const reverted = await switchProjectBibleVersion({
+      dramaId, targetVersionId: firstId, expectedVersionId: second.version_id, connectionPool: pool,
+    })
+    assert.equal(reverted.changed, true)
+    assert.equal(reverted.current.version_id, firstId)
+    assert.equal(reverted.current.bible.logline, '第一版')
+    const [countAfterRevert] = await pool.query('SELECT COUNT(*) AS count FROM project_bible_versions WHERE drama_id = ?', [dramaId])
+    assert.equal(Number(countAfterRevert[0].count), 2, '回退不得新建或删除版本行')
+    const [pointerAfterRevert] = await pool.query('SELECT current_bible_version_id FROM dramas WHERE id = ?', [dramaId])
+    assert.equal(Number(pointerAfterRevert[0].current_bible_version_id), firstId)
+
+    // 已在目标版本 → 幂等，changed=false
+    const noop = await switchProjectBibleVersion({
+      dramaId, targetVersionId: firstId, expectedVersionId: firstId, connectionPool: pool,
+    })
+    assert.equal(noop.changed, false)
+
+    // 过期 CAS → 409，且指针不变
+    await assert.rejects(
+      () => switchProjectBibleVersion({ dramaId, targetVersionId: second.version_id, expectedVersionId: second.version_id, connectionPool: pool }),
+      (err) => err instanceof ProjectBibleConflict,
+    )
+    const [pointerAfterConflict] = await pool.query('SELECT current_bible_version_id FROM dramas WHERE id = ?', [dramaId])
+    assert.equal(Number(pointerAfterConflict[0].current_bible_version_id), firstId)
+
+    // 跨项目 target / 不存在版本 → 400；非法 target → 400
+    await assert.rejects(
+      () => switchProjectBibleVersion({ dramaId, targetVersionId: other.version_id, expectedVersionId: firstId, connectionPool: pool }),
+      /目标大纲版本不存在或不属于当前项目/,
+    )
+    await assert.rejects(
+      () => switchProjectBibleVersion({ dramaId, targetVersionId: 0, expectedVersionId: firstId, connectionPool: pool }),
+      /target_version_id 必须是合法正整数/,
+    )
+
+    // 4.11 历史版本详情：本项目可读，跨项目 → 404
+    const detail = await getProjectBibleVersion(dramaId, firstId, pool)
+    assert.equal(detail.bible.logline, '第一版')
+    await assert.rejects(
+      () => getProjectBibleVersion(otherDramaId, firstId, pool),
       (err) => err instanceof ProjectBibleNotFound,
     )
   } finally {
