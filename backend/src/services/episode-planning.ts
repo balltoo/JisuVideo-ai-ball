@@ -3,6 +3,23 @@ export interface EpisodeOutlineItem {
   summary?: string
 }
 
+/**
+ * 剥掉模型自带在标题前的「第N集：」前缀。
+ *
+ * 前端分集卡片左侧已单独渲染 `EP 0N`，标题再带前缀会显示成「EP 01 · 第1集：沉默的周一」。
+ * 仅在「序号 + 集次量词 + 分隔符 + 正文」四部分齐全时剥离（如 `第1集：沉默的周一`、`第1集 沉默的周一`）；
+ * 整条标题就是前缀（如 `第1集`）、或前缀后直接接正文（如 `第三集的反转`）时保持原样，
+ * 避免把正常标题误伤成空串或断句。
+ */
+export function stripEpisodeNumberPrefix(title: string): string {
+  const trimmed = String(title ?? '').trim()
+  const matched = trimmed.match(
+    /^第\s*[0-9０-９一二三四五六七八九十百千两]+\s*[集话回](?:\s*[：:、.．·\-—]\s*|\s+)([\s\S]+)$/,
+  )
+  if (!matched) return trimmed
+  return matched[1].trim() || trimmed
+}
+
 function naturalBoundaries(text: string) {
   const result = new Set<number>()
   const pattern = /[。！？!?](?:[”’」』])?|\r?\n\s*\r?\n/g
@@ -38,14 +55,20 @@ export function splitSourceIntoEpisodes(content: string, requestedCount: number,
 
   return chunks.filter(Boolean).map((chunk, index) => ({
     episode_number: index + 1,
-    title: String(outlines[index]?.title || `第${index + 1}集`).trim(),
+    title: stripEpisodeNumberPrefix(String(outlines[index]?.title || `第${index + 1}集`)),
     summary: String(outlines[index]?.summary || '').trim(),
     content: chunk,
     character_count: chunk.length,
   }))
 }
 
+/**
+ * 兜底集数估算：仅在 AI 未能给出集数、且用户未指定集数时使用。
+ *
+ * 取竖屏短剧的常见节奏——单集 1-3 分钟，对应约 800-1200 中文字符，中位取 1000。
+ * （原值按每集 2500-4500 字的长视频假设取 3500，2635 字原文只能算出 1 集，与短剧实际相差约 10 倍。）
+ * 参照实测：2635 字原文最终选定 3 集，其中一集 886 字对应约 114 秒成片。
+ */
 export function defaultEpisodeCount(contentLength: number) {
-  // 初稿按每集约 2500-4500 中文字符估算，限制在 1-30 集。
-  return Math.max(1, Math.min(30, Math.round(contentLength / 3500) || 1))
+  return Math.max(1, Math.min(30, Math.round(contentLength / 1000) || 1))
 }
