@@ -228,7 +228,10 @@
           :has-script="!!scriptContent"
           :running="rn"
           :task-type="rt"
+          :dirty="stepDirty"
+          :save-notice="saveNotice"
           @save-raw="saveRaw(); toast.success('已保存')"
+          @save-script="saveScript"
           @rewrite="doRewrite"
           @skip-rewrite="skipRewrite"
           @update:raw="localRaw = $event"
@@ -741,6 +744,13 @@
                   </div>
                   <span class="tag mono">{{ refBindableAssets.filter(a => a.bound).length }}/{{ refBindableAssets.length }} 已绑定</span>
                 </div>
+                <!-- P1-3：资产缺图 / 参考图超限显式警告（指名受影响的角色、场景、道具） -->
+                <div v-if="shotRefWarnings.length" class="storyboard-ref-warnings">
+                  <div v-for="(warning, wi) in shotRefWarnings" :key="'ref-w-' + wi" class="storyboard-ref-warning">
+                    <span class="storyboard-ref-warning-icon">!</span>
+                    <span class="storyboard-ref-warning-text">{{ warning }}</span>
+                  </div>
+                </div>
                 <div class="storyboard-ref-list">
                   <template v-for="group in ['角色', '场景', '道具']" :key="group">
                     <div v-if="refBindableAssets.filter(a => a.type === group).length" class="storyboard-ref-group">
@@ -1167,6 +1177,14 @@
                       </span>
                     </div>
                   </section>
+
+                  <!-- P1-3：提交前的参考图体检——缺图 / 超限均指名到具体素材，避免「脸不一致」无法归因 -->
+                  <div v-if="shotRefWarnings.length" class="video-inspector-warnings">
+                    <div v-for="(warning, wi) in shotRefWarnings" :key="'vid-w-' + wi" class="video-inspector-warning">
+                      <span class="video-inspector-warning-icon">!</span>
+                      <span>{{ warning }}</span>
+                    </div>
+                  </div>
 
                   <button
                     class="btn btn-primary video-inspector-action"
@@ -1767,6 +1785,7 @@ import LoadingButton from '~/components/LoadingButton.vue'
 import EpisodeExportPanel from '~/components/EpisodeExportPanel.vue'
 import EpisodeScriptPanel from '~/components/EpisodeScriptPanel.vue'
 import { resolveScriptPanelState } from '~/utils/episode-script-state.mjs'
+import { auditShotReferenceImages, buildShotReferenceWarnings } from '~/utils/shot-reference-audit.mjs'
 import { useAgent } from '~/composables/useAgent'
 
 definePageMeta({ layout: 'studio' })
@@ -2077,6 +2096,55 @@ const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
 const epId = computed(() => episode.value?.id || 0)
 const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
+
+// ===== P1-2：剧本保存可见化（Issue #128）=====
+// localRaw/localScript 是纯内存缓冲，刷新即丢；Step1 原先只有「跳过改写 / 重新改写」，
+// 真正的保存藏在 goNextStep() 里（点底部「资产」才触发），试跑者一度以为改动已丢失。此处补：
+//   ① 脏标记 rawDirty/scriptDirty —— 面板保存状态提示「未保存 / 已保存」；
+//   ② 显式保存入口 saveScript()（复用既有 saveScr）；
+//   ③ 2s debounce 自动保存 + 离页未保存提示（beforeunload）。
+const SCRIPT_AUTOSAVE_DELAY_MS = 2000
+const rawDirty = computed(() => localRaw.value !== rawContent.value)
+const scriptDirty = computed(() => localScript.value !== scriptContent.value)
+const stepDirty = computed(() => (scriptStep.value === 0 ? rawDirty.value : scriptDirty.value))
+const saveNotice = ref('')
+let saveNoticeTimer = null
+let scriptAutosaveTimer = null
+
+function flashSaveNotice(text) {
+  saveNotice.value = text
+  if (saveNoticeTimer != null) window.clearTimeout(saveNoticeTimer)
+  saveNoticeTimer = window.setTimeout(() => { saveNotice.value = '' }, 4000)
+}
+// 显式保存（Step1 工具栏按钮）——复用既有 saveScr，反馈与 Step0 的 @save-raw 保持一致
+function saveScript() { saveScr(); toast.success('已保存') }
+// debounce 自动保存：仅在 Step1 且非改写进行中触发，避免与 Agent 回写抢跑
+function autosaveScript() {
+  if (!scriptDirty.value) return
+  saveScr()
+  const now = new Date()
+  const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  flashSaveNotice(`已自动保存 ${hhmm}`)
+}
+watch(localScript, () => {
+  if (scriptAutosaveTimer != null) { window.clearTimeout(scriptAutosaveTimer); scriptAutosaveTimer = null }
+  if (scriptStep.value !== 1) return
+  if (rn.value && rt.value === 'script_rewriter') return
+  if (!scriptDirty.value) return
+  scriptAutosaveTimer = window.setTimeout(() => { scriptAutosaveTimer = null; autosaveScript() }, SCRIPT_AUTOSAVE_DELAY_MS)
+})
+// 离页守卫：raw/script 任一未保存即弹浏览器原生确认（未保存内容有提示，不静默丢失）
+function handleBeforeUnload(e) {
+  if (!rawDirty.value && !scriptDirty.value) return
+  e.preventDefault()
+  e.returnValue = ''
+}
+onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  if (scriptAutosaveTimer != null) { window.clearTimeout(scriptAutosaveTimer); scriptAutosaveTimer = null }
+  if (saveNoticeTimer != null) { window.clearTimeout(saveNoticeTimer); saveNoticeTimer = null }
+})
 
 // ===== 拼接导出（P2-B2）：面板 UI 已下沉 EpisodeExportPanel =====
 // 主壳保留：① 拼接发起/轮询需读写 mergeData（顶栏「查看成片」/侧栏阶段/底部气泡共用）；
@@ -3765,24 +3833,53 @@ function formatHistoryTime(iso) {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-function getShotReferenceImages(sb) {
-  const refs = []
-  const pushRef = (value) => {
-    const normalized = normalizeMediaUrl(value)
-    if (!normalized || refs.includes(normalized) || refs.length >= 9) return
-    refs.push(normalized)
-  }
+// 分镜参考图候选（顺序：场景 → 角色 → 道具 → 手动上传）——审计与实际取值共用同一候选列表
+function shotRefCandidates(sb) {
+  const out = []
   const scene = getStoryboardScene(sb)
-  pushRef(scene?.image_url || scene?.imageUrl)
+  if (scene) {
+    out.push({
+      key: `scene-${scene.id}`,
+      type: '场景',
+      name: scene.location || '未命名场景',
+      imageUrl: normalizeMediaUrl(scene.image_url || scene.imageUrl),
+    })
+  }
   for (const char of getStoryboardCharacters(sb)) {
-    pushRef(char?.image_url || char?.imageUrl)
+    out.push({
+      key: `character-${char.id}`,
+      type: '角色',
+      name: char.name || '未命名角色',
+      imageUrl: normalizeMediaUrl(char.image_url || char.imageUrl),
+    })
   }
   for (const prop of getStoryboardProps(sb)) {
-    pushRef(prop?.image_url || prop?.imageUrl)
+    out.push({
+      key: `prop-${prop.id}`,
+      type: '道具',
+      name: prop.name || '未命名道具',
+      imageUrl: normalizeMediaUrl(prop.image_url || prop.imageUrl),
+    })
   }
   // 手动上传的参考图片追加到尾部（总计 ≤9）
-  for (const url of videoRefImageUrls.value) pushRef(url)
-  return refs
+  for (const url of videoRefImageUrls.value) {
+    out.push({ key: `manual-${url}`, type: '手动上传', name: '手动上传图片', imageUrl: normalizeMediaUrl(url), manual: true })
+  }
+  return out
+}
+
+// P1-3：参考图审计——missing（已绑定缺图）/ dropped（图片重复或超 9 张未纳入），供 UI 显式警告。
+// 说明：原 getShotReferenceImages 用归一化 URL 去重、而 getShotReferenceIndexMap 用原始 URL，
+// 两处口径不一致；本次统一为「审计结果单一来源」，警告、@索引、实际上传三者必然一致。
+const shotRefAudit = computed(() => (
+  selectedSb.value
+    ? auditShotReferenceImages(shotRefCandidates(selectedSb.value))
+    : { limit: 9, used: 0, included: [], missing: [], dropped: [] }
+))
+const shotRefWarnings = computed(() => buildShotReferenceWarnings(shotRefAudit.value))
+
+function getShotReferenceImages(sb) {
+  return auditShotReferenceImages(shotRefCandidates(sb)).included.map(asset => asset.imageUrl)
 }
 
 function getShotReferenceAssets(sb) {
@@ -3922,25 +4019,13 @@ const mentionOptions = computed(() => {
   ]
 })
 
-// 按参考图顺序（场景图在前、角色图居中、道具图在后）为 @名字 建立索引映射，供视频提示词引用替换
+// 按参考图顺序（场景图在前、角色图居中、道具图在后）为 @名字 建立索引映射，供视频提示词引用替换。
+// 索引直接取自 shotRefAudit 的 included（= 实际上传顺序），故 @图片N 的 N 恒与真实参考图位次一致；
+// 手动上传排在绑定素材之后、不参与 @名字 映射（与既有行为一致）。
 function getShotReferenceIndexMap(sb) {
-  const ordered = []
-  const seen = new Set()
-  const push = (name, url) => {
-    if (!url || seen.has(url) || ordered.length >= 9) return
-    seen.add(url)
-    ordered.push({ name, imageUrl: url })
-  }
-  const scene = getStoryboardScene(sb)
-  push(scene?.location || '', scene?.image_url || scene?.imageUrl)
-  for (const char of getStoryboardCharacters(sb)) {
-    push(char.name || '', char?.image_url || char?.imageUrl)
-  }
-  for (const prop of getStoryboardProps(sb)) {
-    push(prop.name || '', prop?.image_url || prop?.imageUrl)
-  }
+  const included = auditShotReferenceImages(shotRefCandidates(sb)).included.filter(asset => !asset.manual)
   const nameToIndex = {}
-  ordered.forEach((a, i) => { if (a.name && !(a.name in nameToIndex)) nameToIndex[a.name] = i + 1 })
+  included.forEach((asset, i) => { if (asset.name && !(asset.name in nameToIndex)) nameToIndex[asset.name] = i + 1 })
   return nameToIndex
 }
 
@@ -5195,6 +5280,39 @@ onMounted(async () => { await refresh(true); loadConfigs(); syncExtractStatus();
 }
 .storyboard-ref-title { font-size: 13px; font-weight: 800; color: var(--text-0); }
 .storyboard-ref-copy { margin-top: 3px; font-size: 11px; color: var(--text-3); }
+/* P1-3：参考图体检警告（缺图 / 超限）——分镜参考面板与视频检查器共用同一文案与配色 */
+.storyboard-ref-warnings {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--warning-border-strong);
+  background: var(--warning-bg);
+}
+.storyboard-ref-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--warning-strong);
+}
+.storyboard-ref-warning-icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--warning-strong);
+  color: var(--text-invert);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+.storyboard-ref-warning-text { min-width: 0; word-break: break-word; }
 .storyboard-ref-list {
   min-height: 0;
   overflow-y: auto;
@@ -6421,6 +6539,34 @@ onMounted(async () => { await refresh(true); loadConfigs(); syncExtractStatus();
 }
 .video-ref-action-group > span { color: var(--text-2); font-size: 11px; font-weight: 600; }
 .video-ref-media-hint { margin-top: 6px; font-size: 11px; color: var(--warning); }
+/* P1-3：提交视频任务前的参考图体检警告（缺图 / 超限），指名受影响素材 */
+.video-inspector-warnings { display: flex; flex-direction: column; gap: 6px; }
+.video-inspector-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--warning-border-strong);
+  border-radius: var(--radius);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.video-inspector-warning-icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--warning-strong);
+  color: var(--text-invert);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
 .video-param-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 12px; }
 .video-param-name { color: var(--text-3); flex-shrink: 0; }
 .video-param-value { color: var(--text-1); text-align: right; font-size: 11px; }

@@ -5,6 +5,8 @@
        以 raw/script 受控下发、update:raw/update:script 回写）、scriptStep（底部气泡/侧栏导航/
        localStorage 持久化共用）、doRewrite/saveRaw/skipRewrite 与 rn/rt 运行态——
        保存/改写/跳过经事件触发主壳执行（改写完成需 refresh 全剧数据，无法在卸载的子组件内进行）。
+       Issue #128 P1-2：Step0/Step1 均渲染保存状态（dirty/saveNotice 由主壳下发），Step1 补显式「保存」
+       入口（emit save-script）——此前 Step1 只有「跳过改写/重新改写」，真正的保存藏在主壳 goNextStep()。
        改写引导空态与改写进行中整块加载态由主壳承载（.step-empty/.step-loading 共享态样式不复制）。 -->
   <div class="step-editor">
     <template v-if="step === 0">
@@ -18,6 +20,7 @@
         </div>
         <div class="toolbar-right">
           <span v-if="rawLen" class="char-count">{{ rawLen }} 字</span>
+          <span v-if="saveStateText" :class="['save-state', dirty ? 'is-dirty' : 'is-saved']">{{ saveStateText }}</span>
           <button class="btn btn-sm" @click="emit('save-raw')">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
             保存
@@ -42,6 +45,11 @@
         </div>
         <div class="toolbar-right">
           <span v-if="scriptLen" class="char-count">{{ scriptLen }} 字</span>
+          <span v-if="saveStateText" :class="['save-state', dirty ? 'is-dirty' : 'is-saved']">{{ saveStateText }}</span>
+          <button class="btn btn-sm" @click="emit('save-script')">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            保存
+          </button>
           <button v-if="hasRaw" class="btn btn-sm" @click="emit('skip-rewrite')">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/><path d="M13 18l6-6-6-6"/></svg>
             跳过改写
@@ -83,11 +91,22 @@ const props = defineProps({
   running: { type: Boolean, default: false },
   /** 当前运行 Agent 类型（主壳 rt）——仅 script_rewriter 属本面板改写中 */
   taskType: { type: String, default: '' },
+  /** 当前步骤的编辑缓冲是否与已保存内容不一致（主壳 rawDirty/scriptDirty 按 step 下发）——保存状态提示 */
+  dirty: { type: Boolean, default: false },
+  /** 临时保存提示（如「已自动保存 14:32」），非空时优先于常规保存状态显示 */
+  saveNotice: { type: String, default: '' },
 })
-const emit = defineEmits(['save-raw', 'rewrite', 'skip-rewrite', 'update:raw', 'update:script'])
+const emit = defineEmits(['save-raw', 'save-script', 'rewrite', 'skip-rewrite', 'update:raw', 'update:script'])
 
 const rawLen = computed(() => props.raw.replace(/\s/g, '').length || 0)
 const scriptLen = computed(() => props.script.replace(/\s/g, '').length || 0)
+// 保存状态文案：dirty 优先；无本地内容时不显示（避免空面板出现「已保存」的误导）
+const saveStateText = computed(() => {
+  if (props.saveNotice) return props.saveNotice
+  if (props.dirty) return '未保存'
+  const hasLocal = props.step === 0 ? !!props.raw.trim() : (!!props.script.trim() || props.hasScript)
+  return hasLocal ? '已保存' : ''
+})
 </script>
 
 <style scoped>
@@ -109,6 +128,10 @@ const scriptLen = computed(() => props.script.replace(/\s/g, '').length || 0)
 }
 .step-name { font-size: 12.5px; font-weight: 700; color: var(--text-1); font-family: var(--font-display); }
 .char-count { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+/* 保存状态提示（Issue #128 P1-2）：未保存用 warning-strong、已保存用弱化文字，避免抢视觉 */
+.save-state { font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
+.save-state.is-dirty { color: var(--warning-strong); }
+.save-state.is-saved { color: var(--text-3); }
 
 /* 编辑区 */
 .step-editor { flex: 1; display: flex; flex-direction: column; min-height: 0; }
