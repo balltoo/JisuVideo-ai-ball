@@ -368,6 +368,18 @@ export const mysqlSchemaStatements = [
     INDEX idx_production_package_import_token (preview_token),
     INDEX idx_production_package_import_drama (drama_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  // Issue #121 批次 A：项目圣经（大纲与全局设定）版本表。
+  // 版本行不可变，历史保留；dramas.current_bible_version_id 指针指向当前生效版本。
+  `CREATE TABLE IF NOT EXISTS project_bible_versions (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    drama_id INT NOT NULL,
+    source VARCHAR(32) NOT NULL DEFAULT 'manual',
+    outline_json LONGTEXT NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    created_at VARCHAR(64) NOT NULL,
+    updated_at VARCHAR(64) NOT NULL,
+    INDEX idx_project_bible_versions_drama (drama_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ]
 
 /**
@@ -458,6 +470,14 @@ export async function initMySqlSchema(pool: Pool) {
   }
   if (!sourceVersionCols.has('source_skip_at')) {
     await pool.query('ALTER TABLE dramas ADD COLUMN source_skip_at VARCHAR(64) AFTER current_source_version_id')
+  }
+  // Issue #121 批次 A：项目圣经当前版本指针。
+  // CREATE TABLE IF NOT EXISTS 不会给已有表补列，启动时幂等补齐（沿用 source_versions 指针模式）。
+  const [biblePointerColumns] = await pool.query<any[]>(
+    "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dramas' AND COLUMN_NAME = 'current_bible_version_id'",
+  )
+  if (!biblePointerColumns.length) {
+    await pool.query('ALTER TABLE dramas ADD COLUMN current_bible_version_id INT AFTER source_skip_at')
   }
   // 用户正文和剧本允许 20 万字符，必须使用 LONGTEXT；ALTER MODIFY 为幂等的数据保留迁移。
   await pool.query('ALTER TABLE dramas MODIFY COLUMN description LONGTEXT, MODIFY COLUMN metadata LONGTEXT')

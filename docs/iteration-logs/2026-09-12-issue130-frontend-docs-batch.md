@@ -1,8 +1,8 @@
-# HB-20260912-06 Issue #130：前端体验与文档小项批次
+# HB-20260912-07 Issue #130：前端体验与文档小项批次
 
 > 实施账号：`balltoo` ｜ 实施线：`production-reliability`
 > 主仓库基线：`541cbef9`（PR #126 合入后的 master）；评审前已合并最新 master `0cbcdab5`（含 PR #131 / #132）
-> 编号沿革：本日志最初登记为 `HB-20260912-05`；合并 master 时发现 PR #132（Issue #127）已先占用该号，故顺延为 **`HB-20260912-06`**
+> 编号沿革：本日志最初登记 `HB-20260912-05`；合并 master 时发现 PR #132（Issue #127）已先占用该号，顺延为 `HB-20260912-06`；再次合并 master `779409b4` 时又发现 PR #133 / #136（Issue #121）已占用 `-06`，最终顺延为 **`HB-20260912-07`**
 > 来源：Issue #130（由 HB-20260912-04 试跑问题清单 §4.3 P2-1/P2-2/P2-9/P2-12、§4.4 P3-1/P3-2/P3-3 拆分而来）
 > 日期：2026-09-12
 
@@ -101,7 +101,7 @@ file 上传入口在首页（`pages/index.vue`），而项目内的粘贴面是 
 | `backend/tests/ai-config-cache-invalidation-structure.test.mjs` | 新增文件，3 条：写入口必失效 / 缓存带 TTL 且导出 / 无第二处配置缓存 |
 | `frontend/app/views/drama/detail.vue` | 集数控制常驻 + 按钮文案 + 起步值 watcher + 全文卡片提示；样式调整 |
 | `frontend/app/pages/index.vue` | 文件面板说明 + 粘贴模式格式提示 + `.source-format-note` 样式 |
-| `docs/iteration-logs/**` | 本日志 + 台账登记（HB-20260912-06） |
+| `docs/iteration-logs/**` | 本日志 + 台账登记（HB-20260912-07） |
 
 无数据库结构变更，无接口契约变更，无 Agent / Skill 提示词变更。
 
@@ -136,7 +136,7 @@ file 上传入口在首页（`pages/index.vue`），而项目内的粘贴面是 
 
 ## 7. 已知限制、风险与回滚
 
-- **HB 编号竞态（已发生，已解决）**：`docs/iteration-logs/` 的编号与台账表是热点区。本日志认领时登记 `HB-20260912-05`；评审前合并 master `0cbcdab5` 时发现 PR #132（Issue #127）已先占用该号，遂顺延为 `HB-20260912-06`（本日志正文、台账 `README.md` 已同步；`-05` 行归属 #127 保留不动）；
+- **HB 编号竞态（两次，均已解决）**：`docs/iteration-logs/` 的编号与台账表是热点区。本日志认领时登记 `HB-20260912-05`；评审前合并 master `0cbcdab5` 时发现 PR #132（Issue #127）已先占用该号，顺延为 `HB-20260912-06`；随后合并 master `779409b4` 时又发现 PR #133 / #136（Issue #121 项目圣经批次 A）已占用 `-06`，最终顺延为 **`HB-20260912-07`**（本日志正文、台账 `README.md` 已同步；`-05` 归 #127、`-06` 归 #121 保留不动）；
 - **热点文件协调**：`detail.vue` 与 Issue #121 同文件、`episode-planning.ts` 与 Issue #129 同文件。认领时两 Issue 均为未分配 `status:ready`，本批次按最小触碰实施（未涉及 #121 的大纲/设定板块、未涉及 #129 的 Skill 规则区）；若两条线随后开工，需按热点锁串行或 rebase 协调；
 - **估值逻辑双写**：前端 `estimateEpisodeCount()` 与后端 `defaultEpisodeCount()` 是同一口径的两份实现，存在漂移风险，缓解办法见 §8；
 - **本地环境差异**：本机 `F:` 盘 git 无法通过常规命令写嵌套 ref（`git checkout -b a/b` 静默失败），本次分支用手工直写 ref 文件创建；另为 worktree 建了指向主 clone 的 `node_modules` 目录联接（已被 gitignore，不入库）。以上均为本机现象，不影响提交内容；
