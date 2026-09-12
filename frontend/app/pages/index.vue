@@ -273,7 +273,7 @@
               <Upload :size="20" :stroke-width="1.6" />
               <div>
                 <strong>{{ importedSourceName || '选择 TXT 或 Markdown 文件' }}</strong>
-                <span>支持 .txt、.md，正文最多 20 万字，也可以把文件拖到这里</span>
+                <span>支持 .txt、.md，正文最多 20 万字；直接上传可完整保留 Markdown 标记，也可以把文件拖到这里</span>
               </div>
               <button type="button" class="btn btn-sm" @click="sourceFileInput?.click()">选择文件</button>
             </div>
@@ -307,6 +307,13 @@
                   {{ sourceContent.trim().length.toLocaleString() }} 字<span v-if="sourceContent.trim().length < 20"> · 至少 20 字</span>
                 </span>
               </Field>
+              <p v-if="sourceMode === 'paste'" class="source-format-note">
+                <FileText :size="13" :stroke-width="1.8" />
+                <span>
+                  从网页或文档的<strong>渲染视图</strong>复制会丢掉 Markdown 标记（例如 <code>## </code> 前缀和标题后的空行）；
+                  原文是 Markdown 时，建议改用上方「上传文件」直接导入 .txt / .md。
+                </span>
+              </p>
             </template>
             <div v-if="sourceMode !== 'production-package'" class="analysis-note">
               <Sparkles :size="14" :stroke-width="1.8" />
@@ -1711,6 +1718,22 @@ onMounted(load)
   gap: 7px;
   color: var(--text-3);
   font-size: 11.5px;
+}
+.source-format-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.source-format-note code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-raised);
+  color: var(--text-2);
+  font-size: 10.5px;
 }
 .spinner-sm {
   width: 13px;

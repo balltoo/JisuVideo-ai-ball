@@ -80,7 +80,7 @@
             <div>
               <span class="source-eyebrow">MASTER TEXT</span>
               <h2>全文内容</h2>
-              <p>这是项目的原始事实源。修改后可重新匹配风格、推荐集数并生成分集草稿。</p>
+              <p>这是项目的原始事实源。修改后可重新匹配风格、推荐集数并生成分集草稿。注意：从渲染视图复制会丢掉 Markdown 标记（如 `## ` 前缀与标题后空行），建议直接粘贴 .txt / .md 的原文。</p>
             </div>
             <span class="source-char-count">{{ projectDraft.content.length.toLocaleString() }} 字</span>
           </div>
@@ -197,20 +197,31 @@
           </div>
         </div>
 
-        <div v-if="episodePlan" class="episode-plan-result">
-          <div class="episode-count-control">
-            <div class="recommended-count">
-              <span>建议集数</span>
-              <strong>{{ episodePlan.recommended_count }}</strong>
-              <p>{{ episodePlan.reason }}</p>
-            </div>
-            <label>
-              <span>调整集数</span>
-              <input v-model.number="episodeCount" class="input" type="number" min="1" max="30" />
-            </label>
-            <button type="button" class="btn" :disabled="episodeAnalyzing" @click="analyzeEpisodePlan(true)">按此集数重新拆分</button>
+        <!-- 集数控制常驻：不必先调用一次「AI 推荐集数」才能拿到输入框（Issue #130 / P2-2） -->
+        <div class="episode-count-control">
+          <div v-if="episodePlan" class="recommended-count">
+            <span>建议集数</span>
+            <strong>{{ episodePlan.recommended_count }}</strong>
+            <p>{{ episodePlan.reason }}</p>
           </div>
+          <p v-else class="episode-count-hint">
+            未调用 AI 也可以直接指定集数拆分；输入框已按全文长度给出起步值。
+          </p>
+          <label>
+            <span>调整集数</span>
+            <input v-model.number="episodeCount" class="input" type="number" min="1" max="30" />
+          </label>
+          <button
+            type="button"
+            class="btn"
+            :disabled="episodeAnalyzing || projectDraft.content.trim().length < 20"
+            @click="analyzeEpisodePlan(true)"
+          >
+            {{ episodeAnalyzing ? '正在分析全文…' : (episodePlan ? '按此集数重新拆分' : '按指定集数拆分') }}
+          </button>
+        </div>
 
+        <div v-if="episodePlan" class="episode-plan-result">
           <div v-if="episodePlanStale" class="episode-plan-stale">
             <strong>全文已发生变化</strong>
             <span>原分集建议仍为你保留，但需要重新点击“AI 推荐集数”后才能确认生成。</span>
@@ -1750,6 +1761,20 @@ watch(() => projectDraft.resolution, (next, previous) => {
   if (episodePlan.value && next !== previous && !applyingServerPlan) scheduleEpisodePlanSave(true)
 })
 
+/**
+ * 未跑「AI 推荐集数」时，集数输入框也要有一个可用的起步值（Issue #130 / P2-2）。
+ * 口径与后端 services/episode-planning.ts:defaultEpisodeCount 保持一致：按约 1000 字/集估算。
+ */
+function estimateEpisodeCount(content) {
+  return Math.max(1, Math.min(30, Math.round(String(content || '').trim().length / 1000) || 1))
+}
+
+watch(() => projectDraft.content, (content) => {
+  // 已有分集草稿时集数由 applyServerEpisodePlan 接管，不覆盖用户随后在卡片上的调整
+  if (episodePlan.value) return
+  episodeCount.value = estimateEpisodeCount(content)
+})
+
 onMounted(() => load(true))
 onBeforeUnmount(() => {
   if (episodePlanSaveTimer) clearTimeout(episodePlanSaveTimer)
@@ -1915,8 +1940,9 @@ onBeforeUnmount(() => {
 .episode-planner-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .episode-planner-actions { display: flex; flex-direction: column; gap: 8px; width: min(300px, 100%); flex-shrink: 0; }
 .episode-requirement-input { min-height: var(--button-height-sm); font-size: 11.5px; }
-.episode-plan-result { display: flex; flex-direction: column; gap: 16px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--border); }
-.episode-count-control { display: grid; grid-template-columns: minmax(0, 1fr) 100px auto; align-items: end; gap: 12px; }
+.episode-plan-result { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
+.episode-count-control { display: grid; grid-template-columns: minmax(0, 1fr) 100px auto; align-items: end; gap: 12px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--border); }
+.episode-count-hint { margin: 0; color: var(--text-3); font-size: 10.5px; line-height: 1.5; }
 .recommended-count { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 9px; }
 .recommended-count > span { color: var(--text-2); font-size: 11px; }
 .recommended-count strong { color: var(--accent); font-size: 26px; line-height: 1; }
