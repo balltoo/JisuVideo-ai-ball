@@ -81,6 +81,14 @@ export const dramaAPI = {
   del: (id: number) => api.del(`/dramas/${id}`),
 }
 
+export const bibleAPI = {
+  // GET /dramas/:id/bible：当前生效的项目圣经（大纲与全局设定）；无数据返回空态
+  get: (id: number) => api.get(`/dramas/${id}/bible`),
+  // PUT /dramas/:id/bible：保存并确认新版本；expected_version_id 为乐观锁（首次传 null，冲突返回 409）
+  save: (id: number, data: { bible: any; expected_version_id: number | null; source?: string }) => api.put(`/dramas/${id}/bible`, data),
+  versions: (id: number) => api.get(`/dramas/${id}/bible/versions`),
+}
+
 export const episodeAPI = {
   create: (data: any) => api.post('/episodes', data),
   update: (id: number, data: any) => api.put(`/episodes/${id}`, data),

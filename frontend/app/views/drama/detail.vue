@@ -60,6 +60,10 @@
         全文内容
         <span v-if="projectDraft.content" class="tab-count">{{ projectDraft.content.length.toLocaleString() }}字</span>
       </button>
+      <button type="button" :class="['tab-btn', { on: activeTab === 'bible' }]" @click="activeTab = 'bible'">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="9" y1="7" x2="16" y2="7"/><line x1="9" y1="11" x2="16" y2="11"/></svg>
+        大纲与全局设定
+      </button>
       <button type="button" :class="['tab-btn', { on: activeTab === 'episodes' }]" @click="activeTab = 'episodes'">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.5"/><line x1="7" y1="8" x2="7" y2="16"/><line x1="10" y1="8" x2="10" y2="16"/><line x1="13" y1="8" x2="13" y2="16"/><line x1="16" y1="8" x2="16" y2="16"/></svg>
         剧集列表
@@ -356,6 +360,10 @@
           </div>
         </div>
       </section>
+    </div>
+
+    <div v-else-if="activeTab === 'bible'">
+      <ProjectBibleCard :drama-id="dramaId" />
     </div>
 
     <div v-else-if="activeTab === 'episodes'" class="ep-grid">
@@ -868,6 +876,7 @@ import BaseSelect from '~/components/BaseSelect.vue'
 import AppDialog from '~/components/AppDialog.vue'
 import StatusBadge from '~/components/StatusBadge.vue'
 import SourceCleanupCard from '~/components/SourceCleanupCard.vue'
+import ProjectBibleCard from '~/components/ProjectBibleCard.vue'
 import { isServerPlanGenerated } from '~/utils/episode-plan-state.mjs'
 
 const route = useRoute()

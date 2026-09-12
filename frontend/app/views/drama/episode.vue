@@ -34,6 +34,13 @@
             <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/{{ pipelineTotal }}</span>
             <span class="studio-meta-inline">{{ chars.length }} 角色 · {{ sbs.length }} 段落</span>
           </div>
+          <div v-if="episodeBible || bibleLoadError" class="studio-bible-row">
+            <span v-if="bibleLoadError" class="tag tag-error studio-bible-error" title="点击重试" @click="loadBible">大纲信息加载失败，点击重试</span>
+            <span v-if="episodeBible?.objective" class="studio-bible-item"><b>本集目标</b>{{ episodeBible.objective }}</span>
+            <span v-if="episodeBible?.previous_recap" class="studio-bible-item"><b>承接</b>{{ episodeBible.previous_recap }}</span>
+            <span v-if="episodeBible?.hook" class="studio-bible-item"><b>钩子</b>{{ episodeBible.hook }}</span>
+            <span v-if="episodeBible?.next_teaser" class="studio-bible-item"><b>下集预告</b>{{ episodeBible.next_teaser }}</span>
+          </div>
         </div>
       </div>
 
@@ -1751,7 +1758,7 @@ import {
   Users, Video, FileText, FolderKanban, Clapperboard, Download, Loader2,
   MapPin, Play, Plus, X, ListTodo, RefreshCw, CircleAlert,
 } from 'lucide-vue-next'
-import { api, dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, propAPI, taskAPI, mergeAPI, aiConfigAPI, uploadAPI, assetLibraryAPI } from '~/composables/useApi'
+import { api, dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, propAPI, taskAPI, mergeAPI, aiConfigAPI, uploadAPI, assetLibraryAPI, bibleAPI } from '~/composables/useApi'
 import { usePagedList } from '~/composables/usePagedList'
 import AppDialog from '~/components/AppDialog.vue'
 import AppDrawer from '~/components/AppDrawer.vue'
@@ -1767,6 +1774,24 @@ definePageMeta({ layout: 'studio' })
 const route = useRoute()
 const dramaId = Number(route.params.id)
 const episodeNumber = Number(route.params.episodeNumber)
+
+// 项目圣经（Issue #121）：本集从大纲继承的目标 / 上集承接 / 下集钩子（只读展示）
+const bibleOutline = ref(null)
+// R1 规范：加载失败保留旧值并内联呈现，禁止静默置空回落空态
+const bibleLoadError = ref('')
+const episodeBible = computed(() => {
+  const episodes = Array.isArray(bibleOutline.value?.episodes) ? bibleOutline.value.episodes : []
+  return episodes.find(item => Number(item.episode_number) === episodeNumber) || null
+})
+async function loadBible() {
+  try {
+    const bible = await bibleAPI.get(dramaId)
+    bibleOutline.value = bible?.has_data ? bible.bible : null
+    bibleLoadError.value = ''
+  } catch (error) {
+    bibleLoadError.value = error?.message || '大纲信息加载失败'
+  }
+}
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), propItems = ref([]), sbs = ref([]), mergeData = ref(null)
 // 角色/场景/道具子资源加载错误（R1：失败保留旧值并内联呈现，禁止静默置空回落「开始提取资产」空态）
@@ -4356,10 +4381,27 @@ async function loadConfigs() {
   }
 }
 
-onMounted(async () => { await refresh(true); loadConfigs(); syncExtractStatus() })
+onMounted(async () => { await refresh(true); loadConfigs(); syncExtractStatus(); loadBible() })
 </script>
 
 <style scoped>
+/* 项目圣经继承信息（Issue #121）：只读展示本集目标 / 承接 / 钩子 */
+.studio-bible-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 6px;
+}
+.studio-bible-item {
+  display: inline-flex;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.studio-bible-error {
+  cursor: pointer;
+}
+
 /* ===== Studio Layout ===== */
 .studio {
   display: flex;

@@ -18,6 +18,8 @@ export const dramas = mysqlTable('dramas', {
   metadata: longtext('metadata'),
   currentSourceVersionId: int('current_source_version_id'),
   sourceSkipAt: varchar('source_skip_at', { length: 64 }),
+  // 项目圣经（大纲与全局设定）当前生效版本指针，NULL = 尚未创建（旧项目兼容，空态）
+  currentBibleVersionId: int('current_bible_version_id'),
   createdAt: varchar('created_at', { length: 64 }).notNull(),
   updatedAt: varchar('updated_at', { length: 64 }).notNull(),
   deletedAt: varchar('deleted_at', { length: 64 }),
@@ -100,6 +102,22 @@ export const sourceAnchors = mysqlTable('source_anchors', {
 }, table => ({
   dramaVersionIndex: index('idx_source_anchors_drama').on(table.dramaId, table.versionId),
   paraIndex: index('idx_source_anchors_para').on(table.versionId, table.paraId),
+}))
+
+// 项目圣经（大纲与全局设定）版本表（Issue #121 批次 A）。版本行不可变：
+// 每次确认 INSERT 新行并由 dramas.current_bible_version_id 切换指针，
+// 历史可查、不可被静默覆盖；版本号 = 自增主键 id，同一项目多行历史是常态，故不设唯一键。
+export const projectBibleVersions = mysqlTable('project_bible_versions', {
+  id: int('id').primaryKey().autoincrement(),
+  dramaId: int('drama_id').notNull(),
+  // 来源：manual（人工编辑确认）/ package-import（生产包导入）/ system（系统生成）
+  source: varchar('source', { length: 32 }).notNull().default('manual'),
+  outlineJson: longtext('outline_json').notNull(),
+  contentHash: varchar('content_hash', { length: 64 }).notNull(),
+  createdAt: varchar('created_at', { length: 64 }).notNull(),
+  updatedAt: varchar('updated_at', { length: 64 }).notNull(),
+}, table => ({
+  dramaIndex: index('idx_project_bible_versions_drama').on(table.dramaId),
 }))
 
 export const characters = mysqlTable('characters', {

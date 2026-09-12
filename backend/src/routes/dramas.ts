@@ -8,6 +8,7 @@ import { getActiveConfigId } from '../services/ai.js'
 import { importNovelSource } from '../services/source-import.js'
 import { defaultEpisodeCount, splitSourceIntoEpisodes } from '../services/episode-planning.js'
 import { contentFingerprint, normalizeReviewablePlan, parseJsonArray, serializePlanDraft, sourceHash } from '../services/episode-plan-draft.js'
+import { getProjectBible, listProjectBibleVersions, saveProjectBible, ProjectBibleConflict, ProjectBibleNotFound } from '../services/project-bible.js'
 import { ensureSourceVersion, getCurrentSourceText, SourceContentConflict, SourceVersionPointerError } from '../services/source-versions.js'
 import {
   estimateSourceCleanup,
@@ -667,6 +668,54 @@ app.put('/:id/episode-plan', async (c) => {
     if (err instanceof PlanVersionConflict) return conflict(c, err.message)
     if (err?.message === '项目不存在') return notFound(c, err.message)
     return badRequest(c, err?.message || '分集草稿保存失败')
+  }
+})
+
+// GET /dramas/:id/bible - 读取当前生效的项目圣经（大纲与全局设定）；无数据返回空态
+app.get('/:id/bible', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  try {
+    return success(c, await getProjectBible(id))
+  } catch (err: any) {
+    if (err instanceof ProjectBibleNotFound) return notFound(c, err.message)
+    return badRequest(c, err?.message || '读取项目圣经失败')
+  }
+})
+
+// GET /dramas/:id/bible/versions - 版本历史（倒序，最多 50 条）；版本行不可变，供历史查看与回退
+app.get('/:id/bible/versions', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  try {
+    return success(c, await listProjectBibleVersions(id))
+  } catch (err: any) {
+    if (err instanceof ProjectBibleNotFound) return notFound(c, err.message)
+    return badRequest(c, err?.message || '读取项目圣经版本历史失败')
+  }
+})
+
+// PUT /dramas/:id/bible - 保存并确认新版本；expected_version_id 为乐观锁（首次保存传 null），冲突返回 409
+app.put('/:id/bible', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return badRequest(c, '项目 id 必须是合法正整数')
+  let body: any = {}
+  try { body = await c.req.json() } catch { return badRequest(c, '请求体必须是 JSON') }
+  if (!Object.prototype.hasOwnProperty.call(body || {}, 'expected_version_id')) {
+    return badRequest(c, '请求体必须包含 expected_version_id（首次保存传 null）')
+  }
+  try {
+    const saved = await saveProjectBible({
+      dramaId: id,
+      bible: body.bible,
+      expectedVersionId: body.expected_version_id,
+      source: body.source,
+    })
+    return success(c, saved)
+  } catch (err: any) {
+    if (err instanceof ProjectBibleConflict) return conflict(c, err.message)
+    if (err instanceof ProjectBibleNotFound) return notFound(c, err.message)
+    return badRequest(c, err?.message || '项目圣经保存失败')
   }
 })
 
