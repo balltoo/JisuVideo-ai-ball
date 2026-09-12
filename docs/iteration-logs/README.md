@@ -108,6 +108,8 @@
 
 | HB-20260912-07 | Issue #130：前端体验与文档小项批次（短剧集数口径 / 标题前缀 / AI 配置缓存核实 / README 宣称对齐 / 懒生成文档 / 导入提示） | 已合入（PR #134，merge `3bf645a`，2026-09-12T06:01:29Z；独立复核 Approved；base 已 rebase 至 `779409b`，唯一冲突为台账 README 追加行）。`defaultEpisodeCount` 除数 3500→**1000**（2635 字由「1 集」修正为 3 集）；新增 `stripEpisodeNumberPrefix()` 并在 `splitSourceIntoEpisodes` 应用 —— AI 主路径 `normalizeEpisodePlan`（`dramas.ts:147`）正由此产出，剧集列表不再出现 `EP 01 · 第1集：…`；集数输入框常驻（未跑 AI 时按 1000 字/集给起步值 + 说明文案）；**P2-12 经核实原结论不成立**（`services/ai.ts` 单一 10s TTL 缓存、三个写入口均已失效、其它读取端直连读表），并以 3 个回归测试锁定不变量；README 删除不实的「字幕处理」宣称、标注字幕与配音为规划中，新增的「音轨策略自动判定」经核实属实（`ffmpeg-merge.ts:136 decideConcatStrategy`）；补 `source_versions` 懒生成文档与导入区「渲染视图复制丢 Markdown 标记」提示。验证：CI backend + frontend 全 pass；合入后 `master` 前端 169/169 + build 通过；后端 320 tests 中 2 个 fail 均为 **#135** 记录的 nonce 并发 flaky（单文件 26/26 全绿），#135 另追加两次命中与「两用例同时失败」的新证据 | [查看 PR #134](https://github.com/Aibrother258/JisuVideo-ai/pull/134) |
 
+| HB-20260912-08 | Issue #121 批次 B-1：项目圣经版本历史查看与回退 | 已合入（PR #139，merge `d252075`，2026-09-12T06:54:30Z；独立复核 Approved，并补跑作者环境未执行的真实 MySQL 段）。新增 `GET /dramas/:id/bible/versions/:versionId`（归属校验 → 跨项目 404）与 `POST /dramas/:id/bible/switch`（事务 + `SELECT … FOR UPDATE` + CAS = `target_version_id` + `expected_version_id`）；**回退只切 `dramas.current_bible_version_id`，不新建 / 不修改 / 不删除任何版本行**（测试以 `doesNotMatch` 双向守卫），已在目标版本时 `changed=false` 不写库；前端 `ProjectBibleCard` 新增版本历史区（列表 / 来源标签 / 当前生效标记 / 内容预览 / 回退），409 只提示 + 刷新不自动重提，当前生效版本禁用回退。验证：typecheck 通过、定向 `project-bible` **15 / 15**（含真库段）、前端 170 / 170 + build、CI 两轮 pass；合入后 `master` 322 tests / 321 pass（1 fail 为 **#135** 的 nonce 并发 flaky，与本次 7 个改动文件无关，其修复见 PR #140）。批次 B 剩余 = 第 6 项（受影响范围）+ 第 7 项（导入展示一致） | [查看 PR #139](https://github.com/Aibrother258/JisuVideo-ai/pull/139) |
+
 ## 记录规范
 
 每篇日志至少包含：
